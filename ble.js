@@ -117,13 +117,22 @@ export class TagConnection extends EventTarget {
     this.device = device;
     this.chars = {};
     this.queue = Promise.resolve();
-    this.onDisconnected = () => this.dispatchEvent(new Event('disconnected'));
+    this.lastHeard = 0;        // when the tag last sent its once-a-second status
+    this.ready = false;        // services found and status messages turned on
+    this.connecting = null;
+    this.onDisconnected = () => { this.ready = false; this.dispatchEvent(new Event('disconnected')); };
     device.addEventListener('gattserverdisconnected', this.onDisconnected);
+    this.onStatus = (e) => {
+      this.lastHeard = Date.now();
+      this.dispatchEvent(new CustomEvent('status', { detail: decodeStatus(e.target.value) }));
+    };
   }
 
   get id() { return this.device.id; }
   get name() { return this.device.name || 'Tether tag'; }
-  get connected() { return !!this.device.gatt?.connected; }
+  // Bluetooth link is up AND the tag is actually talking to us
+  get connected() { return !!this.device.gatt?.connected && this.ready; }
+  get alive() { return this.connected && Date.now() - this.lastHeard < 8000; }
 
   static async pick() {
     const device = await navigator.bluetooth.requestDevice({
@@ -139,32 +148,65 @@ export class TagConnection extends EventTarget {
     try { return (await navigator.bluetooth.getDevices()).map((d) => new TagConnection(d)); } catch { return []; }
   }
 
-  async connect() {
-    if (this.device.watchAdvertisements && !this.connected) {
-      // Some Chrome versions need to "see" the device before reconnecting
-      try {
-        const seen = new Promise((res) => this.device.addEventListener('advertisementreceived', res, { once: true }));
-        await this.device.watchAdvertisements();
-        await Promise.race([seen, new Promise((r) => setTimeout(r, 4000))]);
-        this.device.unwatchAdvertisements?.();
-      } catch { /* not supported; just try to connect */ }
+  // Only one connection attempt at a time; every step has a time limit so
+  // nothing can hang forever.
+  connect() {
+    if (!this.connecting) {
+      this.connecting = this._connect().finally(() => { this.connecting = null; });
     }
-    const server = await this.device.gatt.connect();
-    const svc = await server.getPrimaryService(UUIDS.service);
-    for (const k of ['settings', 'command', 'status', 'audio', 'quiet']) {
-      this.chars[k] = await svc.getCharacteristic(UUIDS[k]);
+    return this.connecting;
+  }
+  async _connect() {
+    this.ready = false;
+    this.queue = Promise.resolve();          // forget anything stuck from before
+    try {
+      const server = await withTimeout(this.device.gatt.connect(), 15000, 'connect');
+      const svc = await withTimeout(server.getPrimaryService(UUIDS.service), 8000, 'services');
+      for (const k of ['settings', 'command', 'status', 'audio', 'quiet']) {
+        this.chars[k] = await withTimeout(svc.getCharacteristic(UUIDS[k]), 5000, 'characteristic');
+      }
+      this.chars.status.removeEventListener('characteristicvaluechanged', this.onStatus);
+      this.chars.status.addEventListener('characteristicvaluechanged', this.onStatus);
+      await withTimeout(this.chars.status.startNotifications(), 5000, 'notifications');
+      this.lastHeard = Date.now();
+      this.ready = true;
+      await this.sendTime().catch(() => {});
+    } catch (e) {
+      try { this.device.gatt.disconnect(); } catch { /* ignore */ }
+      throw e;
     }
-    this.chars.status.addEventListener('characteristicvaluechanged', (e) => {
-      this.dispatchEvent(new CustomEvent('status', { detail: decodeStatus(e.target.value) }));
-    });
-    await this.chars.status.startNotifications();
-    await this.sendTime();
   }
 
-  disconnect() { try { this.device.gatt.disconnect(); } catch { /* ignore */ } }
+  disconnect() { this.ready = false; try { this.device.gatt.disconnect(); } catch { /* ignore */ } }
 
-  // Writes go one at a time; Bluetooth can't do two at once
-  run(fn) { this.queue = this.queue.then(fn, fn); return this.queue; }
+  // Resolves true when the tag is heard nearby, false if not heard in time,
+  // or null if this browser can't listen for it (then just try connecting).
+  async waitUntilNearby(ms) {
+    if (!this.device.watchAdvertisements) { await sleep(ms); return null; }
+    let done;
+    const seen = new Promise((res) => { done = res; });
+    const onAd = () => done(true);
+    this.device.addEventListener('advertisementreceived', onAd);
+    try {
+      await this.device.watchAdvertisements();
+    } catch {
+      this.device.removeEventListener('advertisementreceived', onAd);
+      await sleep(ms);
+      return null;
+    }
+    const result = await Promise.race([seen, sleep(ms).then(() => false)]);
+    this.device.removeEventListener('advertisementreceived', onAd);
+    try { this.device.unwatchAdvertisements?.(); } catch { /* ignore */ }
+    return result;
+  }
+
+  // Bluetooth can only do one thing at a time. Each step gets 6 seconds;
+  // if it doesn't finish, it fails instead of blocking everything after it.
+  run(fn) {
+    const next = this.queue.catch(() => {}).then(() => withTimeout(fn(), 6000, 'bluetooth'));
+    this.queue = next.catch(() => {});
+    return next;
+  }
 
   async readSettings() {
     return this.run(async () => ({
@@ -197,6 +239,15 @@ export class TagConnection extends EventTarget {
     }
     await this.run(() => c.writeValueWithResponse(new Uint8Array([3])));
   }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function withTimeout(promise, ms, what) {
+  let t;
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what + ' took too long')), ms); }),
+  ]).finally(() => clearTimeout(t));
 }
 
 // ---------------------------------------------------------------------------
@@ -258,8 +309,14 @@ export class DemoTag extends EventTarget {
     for (let i = 1; i <= 10; i++) { await wait(120); onProgress?.(i / 10); }
     this.hasRecording = true;
   }
-  // Demo helper: pretend the tag walked out of range
-  simulateLoss() { this.disconnect(); }
+  get alive() { return this.connected; }
+  async waitUntilNearby(ms) {
+    const left = Math.max(0, (this.awayUntil || 0) - Date.now());
+    await sleep(Math.min(ms, left || 500));
+    return Date.now() >= (this.awayUntil || 0);
+  }
+  // Demo helper: pretend the tag walked out of range for 12 seconds
+  simulateLoss() { this.awayUntil = Date.now() + 12000; this.disconnect(); }
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

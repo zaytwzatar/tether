@@ -62,6 +62,7 @@ const rssiHistory = new Map();
 
 const ui = {
   modal: null, queue: [], untilBack: new Set(), lastRing: {},
+  down: new Set(), recovering: new Set(), lastStatus: {}, visibleSince: Date.now(), needTap: false,
   draft: null, draftKey: '', editing: false,
   recorder: null, clip: null, uploading: 0, busy: '',
   pending: null, pendingName: '', installPrompt: null,
@@ -102,6 +103,7 @@ async function connectTag(tag) {
   }
   userClosed.delete(tag.id);
   await conn.connect();
+  ui.down.delete(tag.id);
   await afterConnect(tag);
   render();
 }
@@ -178,6 +180,8 @@ function onStatus(id, st) {
   if (!tag) return;
   const prev = status.get(id);
   status.set(id, st);
+  ui.lastStatus[id] = st;
+  ui.down.delete(id);
   const hist = rssiHistory.get(id) || [];
   hist.push(st.rssi); if (hist.length > 6) hist.shift();
   rssiHistory.set(id, hist);
@@ -217,10 +221,23 @@ function onStatus(id, st) {
 
 function onDisconnected(id) {
   const tag = tagById(id);
-  const lastSt = status.get(id);
+  const lastSt = status.get(id) || ui.lastStatus[id];
   status.delete(id);
   if (!tag) return;
   if (userClosed.has(id)) { render(); return; }
+  if (ui.down.has(id)) { keepTrying(tag); return; }   // already handled
+  ui.down.add(id);
+  // The app lost touch but the link may just need a restart: try quietly first,
+  // and only alert if the tag still can't be reached.
+  if (ui.recovering.has(id)) {
+    render();
+    keepTrying(tag);
+    setTimeout(() => {
+      ui.recovering.delete(id);
+      if (!isConnected(id) && tagById(id) && !userClosed.has(id)) { ui.down.delete(id); onDisconnected(id); }
+    }, 15000);
+    return;
+  }
   tag.lastSeenAt = Date.now();
   if (tag.phone.saveLocation && 'geolocation' in navigator) {
     navigator.geolocation.getCurrentPosition((p) => {
@@ -244,23 +261,54 @@ function raiseAlert(tag) {
 }
 const phoneTone = (tag) => (tag.settings.tone === 6 ? 5 : tag.settings.tone);
 
-// While the app is open, quietly try to reconnect when the tag comes back
+// While the app is open, keep looking for the tag and reconnect by itself
+// as soon as it's back in range.
+const wakers = new Set();             // lets "app opened again" skip the wait
+const wakeUp = () => { const ws = [...wakers]; wakers.clear(); ws.forEach((w) => w()); };
 async function keepTrying(tag) {
   if (reconnecting.has(tag.id)) return;
   reconnecting.add(tag.id);
+  let attempt = 0;
+  render();
   while (tagById(tag.id) && !isConnected(tag.id) && !userClosed.has(tag.id)) {
-    await sleep(tag.demo ? 12000 : 10000);
+    const conn = live.get(tag.id);
+    if (!conn) break;
+    attempt++;
+    // Listen for the tag if the browser can; otherwise just wait a little
+    const waitMs = Math.min(2000 * attempt, 8000);
+    let waker;
+    const near = await Promise.race([conn.waitUntilNearby(waitMs), new Promise((r) => { waker = () => r(null); wakers.add(waker); })]);
+    wakers.delete(waker);
     if (!tagById(tag.id) || userClosed.has(tag.id) || isConnected(tag.id)) break;
+    if (near === false) continue;     // not heard yet
     try {
-      await Promise.race([live.get(tag.id).connect(), sleep(8000).then(() => { throw new Error('timeout'); })]);
-      await afterConnect(tag);
+      await conn.connect();
+      await afterConnect(tag).catch(() => {});
+      attempt = 0;
       onBack(tag);
-    } catch { /* still away */ }
+    } catch { /* still away; try again */ }
   }
   reconnecting.delete(tag.id);
+  render();
+}
+
+// If we stop hearing the tag's once-a-second message, the link is stuck:
+// restart it quietly instead of pretending everything is fine.
+function watchdog() {
+  if (document.visibilityState !== 'visible' || Date.now() - ui.visibleSince < 10000) return;
+  for (const tag of store.tags) {
+    const conn = live.get(tag.id);
+    if (!conn || tag.demo || !conn.connected || conn.alive || ui.recovering.has(tag.id)) continue;
+    ui.recovering.add(tag.id);
+    conn.disconnect();
+    setTimeout(() => { if (!ui.down.has(tag.id) && !isConnected(tag.id)) onDisconnected(tag.id); }, 1500);
+  }
 }
 
 function onBack(tag) {
+  ui.down.delete(tag.id);
+  const quietFix = ui.recovering.delete(tag.id);
+  if (quietFix) { render(); return; }     // a quick hiccup, fixed without bothering anyone
   notify(tag.name + ' is back!', 'Back in range.');
   const waited = ui.untilBack.delete(tag.id);
   if (waited && ui.untilBack.size === 0) stopAlarm();
@@ -330,6 +378,10 @@ function tagStatus(tag) {
   if (isConnected(tag.id)) {
     if (st?.alerting) return { k: 'alert', short: 'Beeping', text: 'Beeping right now' };
     return { k: 'good', short: 'With you', text: closeness(st?.rssi) };
+  }
+  if (ui.recovering.has(tag.id)) return { k: 'idle', short: 'Reconnecting…', text: 'Just a moment' };
+  if (reconnecting.has(tag.id) && (tag.lastSeenAt || tag.lastSeen)) {
+    return { k: 'away', short: 'Out of range', text: 'Looking for it… last seen ' + timeAgo(tag.lastSeenAt || tag.lastSeen?.time) };
   }
   if (tag.lastSeenAt || tag.lastSeen) return { k: 'away', short: 'Out of range', text: 'Last seen ' + timeAgo(tag.lastSeenAt || tag.lastSeen?.time) };
   return { k: 'idle', short: 'Not connected', text: 'Tap Connect when it is nearby' };
@@ -541,6 +593,9 @@ function viewHome() {
     summary = `<section class="summary k-paused"><span class="sum-icon">${icon('moon', 26)}</span>
       <span class="grow"><b>Alerts are paused</b><span>${until > Date.now() ? 'Until ' + clock(until) : 'For now'}</span></span>
       <button type="button" class="btn purple" data-action="resume-all">Turn back on</button></section>`;
+  } else if (all.some((t) => !t.demo && !live.has(t.id))) {
+    summary = `<section class="summary k-paused"><span class="sum-icon">${icon('bt', 26)}</span>
+      <span class="grow"><b>Tap Connect to link up</b><span>After the app restarts, tap Connect once on each tag. Then it reconnects by itself.</span></span></section>`;
   } else if (away.length) {
     summary = `<section class="summary k-away"><span class="sum-icon">${icon('alert', 26)}</span>
       <span class="grow"><b>${esc(away.map((t) => t.name).join(' and '))} ${away.length === 1 ? 'is' : 'are'} out of range</b><span>Did you leave ${away.length === 1 ? 'it' : 'them'} behind?</span></span></section>`;
@@ -640,6 +695,7 @@ function viewTag(tag) {
       <h2 class="h2">When I walk away from my phone, the tag will…</h2>
       <div class="choice-grid" role="group" aria-label="Tag alert">${choices}</div>
       ${check}
+      ${connected && set.motionOnly && set.style !== 5 ? `<p class="note k-idle">${icon('walk', 18)}<span>It only beeps while the tag is <b>moving</b>. Leaving the tag on a table and walking away with your phone? <button type="button" class="link-btn" data-action="motion-off">Beep even when it's still</button></span></p>` : ''}
       ${connected ? `<button type="button" class="btn soft wide" data-action="test-alert" data-id="${esc(tag.id)}">${icon('sparkle', 20)}Test it now</button>` : ''}
     </section>
 
@@ -1074,6 +1130,11 @@ const actions = {
     tag.settings = { ...tag.settings, style: Number(el.dataset.v) };
     await saveTagNow(tag, Number(el.dataset.v) === 5 ? 'The tag will stay quiet.' : 'Saved!');
   },
+  async 'motion-off'() {
+    const tag = tagById(route().id);
+    tag.settings = { ...tag.settings, motionOnly: false };
+    await saveTagNow(tag, 'Done! The tag beeps even when it sits still.');
+  },
   async 'quiet-off'() {
     const tag = tagById(route().id);
     tag.quiet = tag.quiet.map((q) => ({ ...q, days: 0 }));
@@ -1283,6 +1344,7 @@ function start() {
       d.connect().then(() => afterConnect(tag)).then(render);
     }
   }
+  const canRemember = !!navigator.bluetooth?.getDevices;
   TagConnection.remembered().then((known) => {
     for (const conn of known) {
       const tag = tagById(conn.id);
@@ -1290,7 +1352,17 @@ function start() {
       attach(tag, conn);
       conn.connect().then(() => afterConnect(tag)).then(render).catch(() => keepTrying(tag));
     }
+    ui.needTap = store.tags.some((t) => !t.demo && !live.has(t.id));
+    if (ui.needTap && !canRemember) render();
   });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    ui.visibleSince = Date.now();
+    for (const tag of store.tags) if (live.has(tag.id) && !isConnected(tag.id) && !userClosed.has(tag.id)) keepTrying(tag);
+    wakeUp();
+    render();
+  });
+  setInterval(watchdog, 2000);
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
   render();
