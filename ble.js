@@ -35,7 +35,7 @@ export const DEFAULT_SETTINGS = {
   interval: 15, style: 0, holdDnd: 60, quietMode: 0,
 };
 export const DEFAULT_QUIET = [
-  { days: 0x7f, start: 22 * 60, end: 7 * 60 },
+  { days: 0, start: 22 * 60, end: 7 * 60 },
   { days: 0, start: 9 * 60, end: 10 * 60 },
 ];
 

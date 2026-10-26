@@ -83,7 +83,7 @@ struct __attribute__((packed)) QuietTimes {
 
 const Settings DEFAULT_SETTINGS = { 1, -76, 0x01, TONE_CHIME, 5, 3, 15, STYLE_SOUND, 60, 0, {0, 0} };
 Settings   settings = DEFAULT_SETTINGS;
-QuietTimes quiet    = { { {0x7F, 22 * 60, 7 * 60}, {0, 9 * 60, 10 * 60} } };
+QuietTimes quiet    = { { {0, 22 * 60, 7 * 60}, {0, 9 * 60, 10 * 60} } };
 
 const char* SETTINGS_FILE = "/tether_settings.bin";
 const char* QUIET_FILE    = "/tether_quiet.bin";

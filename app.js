@@ -383,19 +383,20 @@ function viewDetail(tag) {
              <a class="btn hero-alt" href="#/tag/${encodeURIComponent(tag.id)}/quiet">${icon('moon', 18)}Snooze</a>`
           : `<button type="button" class="btn accent" data-action="connect" data-id="${esc(tag.id)}">${icon('bt', 18)}Connect</button>`}
       </div>
-      ${connected && st && !st.phoneConnected && !tag.demo ? `<p class="hero-note">For left-behind alerts, pair this tag in your phone's Bluetooth settings too. A computer only changes settings.</p>` : ''}
     </section>
 
-    <h2 class="section">Alerts on the tag</h2>
+    ${leaveBehindSection(tag, st, connected)}
+
+    <h2 class="section">More tag settings</h2>
     <nav class="list" aria-label="Tag alert settings">
       <a href="#/tag/${encodeURIComponent(tag.id)}/distance"><span class="grow"><b>Alert distance</b><small>About ${fmtDist(rssiToFeet(s.threshold))}${s.motionOnly ? ' · only while moving' : ''}</small></span>${icon('chev', 18)}</a>
       <a href="#/tag/${encodeURIComponent(tag.id)}/sound"><span class="grow"><b>Alert sound</b><small>${esc(TONES[s.tone]?.name)} · volume ${s.volume} · ${s.repeat ? 'repeat ' + s.repeat + '×' : 'until stopped'}</small></span>${icon('chev', 18)}</a>
       <a href="#/tag/${encodeURIComponent(tag.id)}/quiet"><span class="grow"><b>Silent &amp; quiet time</b><small>${esc(STYLES[s.style]?.name)} · ${esc(quietText)}</small></span>${icon('chev', 18)}</a>
     </nav>
 
-    <h2 class="section">Alerts on this device</h2>
+    <h2 class="section">Also alert on this phone</h2>
     <div class="list">
-      ${toggleRow('phone-leave', tag.phone.leave, 'Alert me if this tag leaves', 'While this app is open. Background alerts come with the installed app version.')}
+      ${toggleRow('phone-leave', tag.phone.leave, 'Notify me if this tag leaves', 'While this app is open. Background alerts come with the installed app version.')}
       ${toggleRow('phone-alarm', tag.phone.alarm, 'Play an alarm, not just a notification', 'Keeps ringing until you stop it')}
       ${toggleRow('phone-location', tag.phone.saveLocation, 'Save where it was last seen', 'Stored only on this device')}
     </div>
@@ -421,6 +422,57 @@ function viewDetail(tag) {
       ${connected ? `<button type="button" class="btn ghost" data-action="disconnect" data-id="${esc(tag.id)}">Disconnect</button>` : ''}
       <button type="button" class="btn ghost danger" data-action="remove" data-id="${esc(tag.id)}">Remove this tag</button>
     </div>`;
+}
+
+// "When you leave your phone behind": the tag's own alert, front and center,
+// plus a check of everything that would keep the tag silent.
+const QUICK_STYLES = [
+  { v: 0, label: 'Beep' },
+  { v: 2, label: 'Flash' },
+  { v: 4, label: 'Beep + flash' },
+  { v: 5, label: 'Off' },
+];
+function leaveBehindSection(tag, st, connected) {
+  const s = tag.settings;
+  const quick = QUICK_STYLES.some((q) => q.v === s.style) ? s.style : null;
+  const styleBtns = QUICK_STYLES.map((q) =>
+    `<button type="button" class="seg ${quick === q.v ? 'on' : ''}" aria-pressed="${quick === q.v}" data-action="quick-style" data-v="${q.v}">${q.label}</button>`).join('');
+
+  const problems = [];
+  if (connected && st && !tag.demo) {
+    if (!st.phoneConnected) problems.push(`<li><b>The tag isn't paired with this phone yet</b>, so it can't tell when you walk away. On your phone open Settings › Connected devices › Pair new device and tap <b>${esc(tag.deviceName)}</b>.</li>`);
+    if (st.quiet) problems.push(`<li><b>Quiet time is on right now</b>, so the tag stays silent. <button type="button" class="link-btn" data-action="quiet-off">Turn quiet times off</button></li>`);
+    if (st.dnd) problems.push(`<li><b>Do not disturb is on</b> (${st.dndMinutes} min left). <button type="button" class="link-btn" data-action="dnd-off" data-id="${esc(tag.id)}">Turn alerts back on</button></li>`);
+  }
+  if (s.style === 5) problems.push('<li><b>The tag alert is off.</b> Pick Beep, Flash or Beep + flash above.</li>');
+
+  let check;
+  if (!connected) check = '<p class="small muted">Connect to check that the tag is ready to alert.</p>';
+  else if (problems.length) check = `<div class="check warn"><b>The tag won't alert right now:</b><ul>${problems.join('')}</ul></div>`;
+  else check = `<div class="check ok-box">${icon('ring', 16)}<span><b>Ready.</b> The tag will ${s.style === 2 ? 'flash' : s.style === 4 ? 'beep and flash' : 'beep'} when you get too far from your phone.</span></div>`;
+
+  return `
+    <h2 class="section">When you leave your phone behind</h2>
+    <section class="card pad stack">
+      <div>
+        <b>The tag will</b>
+        <div class="segmented four tight" role="group" aria-label="Tag alert">${styleBtns}</div>
+        ${quick === null ? `<p class="small muted">Using “${esc(STYLES[s.style]?.name)}”. More choices in Silent &amp; quiet time.</p>` : ''}
+      </div>
+      <label class="toggle-row bare"><span class="grow"><b>Only while the tag is moving</b>
+        <small>Stops beeps when your keys sit on a table. Testing by walking away with your <i>phone</i> and leaving the tag still? Turn this off.</small></span>
+        <input type="checkbox" role="switch" data-bind="tag-motion" ${s.motionOnly ? 'checked' : ''}></label>
+      ${check}
+      ${connected ? `<button type="button" class="btn outline" data-action="test-alert" data-id="${esc(tag.id)}">${icon('ring', 18)}Test the tag's alert</button>` : ''}
+    </section>`;
+}
+
+async function saveTagNow(tag, msg) {
+  try {
+    const sent = await pushToTag(tag);
+    toast(sent ? msg : 'Saved. It will be sent when the tag connects.');
+  } catch (e) { tag.needsSync = true; save(); toast('Saved here, but the tag did not answer: ' + e.message); }
+  render();
 }
 
 function toggleRow(bind, on, title, sub) {
@@ -760,6 +812,20 @@ const actions = {
     live.get(el.dataset.id)?.disconnect();
     render();
   },
+  async 'quick-style'(el) {
+    const tag = tagById(route().id);
+    tag.settings = { ...tag.settings, style: Number(el.dataset.v) };
+    await saveTagNow(tag, Number(el.dataset.v) === 5 ? 'Tag alert turned off.' : 'Saved to ' + tag.name + '.');
+  },
+  async 'quiet-off'() {
+    const tag = tagById(route().id);
+    tag.quiet = tag.quiet.map((q) => ({ ...q, days: 0 }));
+    await saveTagNow(tag, 'Quiet times turned off.');
+  },
+  async 'test-alert'(el) {
+    const t = tagById(el.dataset.id);
+    if (await command(t, CMD.ring)) toast('The tag should beep and flash now. If it stays silent, tell me what the Serial Monitor shows.');
+  },
   async ring(el) { const t = tagById(el.dataset.id); if (await command(t, CMD.ring)) toast('Ringing ' + t.name + '…'); },
   async stop(el) { await command(tagById(el.dataset.id), CMD.stop); },
   async flash(el) { await command(tagById(el.dataset.id), CMD.flash); },
@@ -922,6 +988,10 @@ function onInput(el, final) {
     case 'qstart': if (el.value) ui.draft.quiet[i].start = fromTimeInput(el.value); if (final) render(); return;
     case 'qend': if (el.value) ui.draft.quiet[i].end = fromTimeInput(el.value); if (final) render(); return;
     case 'draft-motionOnly': ui.draft.motionOnly = el.checked; return;
+    case 'tag-motion':
+      tag.settings = { ...tag.settings, motionOnly: el.checked };
+      saveTagNow(tag, el.checked ? 'The tag only alerts while it moves.' : 'The tag alerts even when it sits still.');
+      return;
     case 'phone-leave': tag.phone.leave = el.checked; save(); return;
     case 'phone-alarm': tag.phone.alarm = el.checked; save(); return;
     case 'phone-location':
