@@ -387,3 +387,45 @@ input[type=radio] { width: 1.5rem; height: 1.5rem; accent-color: var(--accent); 
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 @media (max-width: 520px) { .time-row { grid-template-columns: 1fr; } }
+
+/* ---------- Three areas, three colors ---------- */
+body { --zone: var(--accent-dark); --zone-soft: var(--accent-soft); }
+body[data-zone="phone"] { --zone: var(--sky); --zone-soft: var(--sky-soft); }
+body[data-zone="settings"] { --zone: var(--pause); --zone-soft: var(--pause-soft); }
+.zone-head { display: flex; flex-direction: column; gap: .5rem; padding-top: .3rem; }
+.zh-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.zone-badge {
+  display: inline-flex; align-items: center; gap: .4rem; width: fit-content;
+  padding: .35rem .8rem; border-radius: 999px; background: var(--zone-soft); color: var(--zone);
+  font-size: .85rem; font-weight: 800; letter-spacing: .02em;
+}
+.back { color: var(--zone); }
+.row-icon { width: 2.8rem; height: 2.8rem; border-radius: 1rem; display: grid; place-items: center; flex-shrink: 0; }
+.row-icon svg { width: 1.5rem; height: 1.5rem; }
+.setting-list.inset { border: 2px solid var(--line); border-radius: 1.2rem; }
+.setting-list.inset .setting-row { min-height: 4rem; padding: .8rem 1rem; }
+.stack.tight { gap: .5rem; }
+.summary.k-idle { color: var(--ink-2); }
+.toggle input:disabled { opacity: .4; }
+
+/* Tab bar: big friendly buttons; My Tags sits raised in the middle */
+.tabbar { align-items: flex-end; padding-top: .2rem; }
+.tabbar a { flex: 1; max-width: 8rem; gap: .2rem; color: var(--muted); background: none !important; }
+.tabbar .tab-ic { width: 3.2rem; height: 2.3rem; border-radius: 999px; display: grid; place-items: center; transition: background .2s, transform .2s; }
+.tabbar a.tab-home .tab-ic {
+  width: 4rem; height: 4rem; margin-top: -1.6rem; border-radius: 50%;
+  background: var(--accent); color: #fff; box-shadow: 0 4px 0 var(--accent-dark), 0 6px 16px rgba(217, 72, 15, .3);
+}
+.tabbar a.on { font-weight: 800; }
+.tabbar a.tab-phone.on { color: var(--sky); }
+.tabbar a.tab-phone.on .tab-ic { background: var(--sky-soft); }
+.tabbar a.tab-settings.on { color: var(--pause); }
+.tabbar a.tab-settings.on .tab-ic { background: var(--pause-soft); }
+.tabbar a.tab-home.on { color: var(--accent-dark); }
+.tabbar a.tab-home.on .tab-ic { transform: scale(1.06); }
+.tabbar a:active .tab-ic { transform: scale(.92); }
+.topnav a[data-tab="phone"].on { background: var(--sky-soft); color: var(--sky); }
+.topnav a[data-tab="settings"].on { background: var(--pause-soft); color: var(--pause); }
+.tabbar a { min-width: 0; white-space: nowrap; font-size: min(.9rem, 16px); }
+.tabbar .tab-ic { max-width: 100%; }
+.tag-main .grow { overflow-wrap: anywhere; }

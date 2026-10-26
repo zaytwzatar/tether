@@ -25,6 +25,13 @@ function load() {
   if (!s || !Array.isArray(s.tags)) s = { tags: [] };
   s.units ??= 'ft';
   s.textSize ??= 'm';
+  const old = s.tags[0]?.phone;
+  s.phone ??= {
+    popup: old ? old.leave !== false : true,
+    sound: old?.alarm ? 'loud' : 'short',
+    vibrate: true, notify: true, tone: 5,
+    saveLocation: old ? old.saveLocation !== false : true,
+  };
   s.tags.forEach((t, i) => {
     t.color ??= i % COLORS.length;
     t.pausedUntil ??= 0;
@@ -194,7 +201,7 @@ function onStatus(id, st) {
   lastEventCount.set(id, st.eventCounter);
   if (prevCount !== undefined && prevCount !== st.eventCounter) {
     if (st.event === 1) {
-      startAlarm(0);
+      startAlarm(store.phone.tone);
       notify('Here is your phone!', tag.name + ' is calling your phone.');
       openModal({ type: 'phone', id });
     }
@@ -211,12 +218,10 @@ function onStatus(id, st) {
 
   // The tag started alerting while still connected (signal got weak)
   const rangAt = ui.lastRing[id] || 0;
-  if (st.alerting && !prev?.alerting && Date.now() - rangAt > 20000 && tag.phone.leave && !isPaused(tag)) {
+  if (st.alerting && !prev?.alerting && Date.now() - rangAt > 20000 && !isPaused(tag)) {
     raiseAlert(tag);
   }
-  const f = document.activeElement;
-  const typing = f && /^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName) && !['checkbox', 'radio', 'range'].includes(f.type);
-  if (!ui.editing && !typing && !ui.recorder) render();
+  softRender();
 }
 
 function onDisconnected(id) {
@@ -224,13 +229,13 @@ function onDisconnected(id) {
   const lastSt = status.get(id) || ui.lastStatus[id];
   status.delete(id);
   if (!tag) return;
-  if (userClosed.has(id)) { render(); return; }
+  if (userClosed.has(id)) { softRender(); return; }
   if (ui.down.has(id)) { keepTrying(tag); return; }   // already handled
   ui.down.add(id);
   // The app lost touch but the link may just need a restart: try quietly first,
   // and only alert if the tag still can't be reached.
   if (ui.recovering.has(id)) {
-    render();
+    softRender();
     keepTrying(tag);
     setTimeout(() => {
       ui.recovering.delete(id);
@@ -239,27 +244,30 @@ function onDisconnected(id) {
     return;
   }
   tag.lastSeenAt = Date.now();
-  if (tag.phone.saveLocation && 'geolocation' in navigator) {
+  if (store.phone.saveLocation && 'geolocation' in navigator) {
     navigator.geolocation.getCurrentPosition((p) => {
       tag.lastSeen = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), time: Date.now() };
-      save(); render();
+      save(); softRender();
     }, () => {}, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
   }
   save();
   const quietNow = lastSt?.quiet || lastSt?.dnd;
-  if (tag.phone.leave && !isPaused(tag) && !quietNow) raiseAlert(tag);
-  render();
+  if (!isPaused(tag) && !quietNow) raiseAlert(tag);
+  softRender();
   keepTrying(tag);
 }
 
+// What THIS PHONE does when a tag goes out of range (My Phone tab)
 function raiseAlert(tag) {
-  notify(tag.name + ' is out of range!', 'Did you leave something behind?');
-  if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
-  if (tag.phone.alarm) startAlarm(phoneTone(tag));
-  else playPattern(1, 4);
-  openModal({ type: 'alert', id: tag.id });
+  const ph = store.phone;
+  if (ph.notify) notify(tag.name + ' is out of range!', 'Did you leave something behind?');
+  if (ph.vibrate && navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
+  if (ph.sound === 'loud') startAlarm(ph.tone);
+  else if (ph.sound === 'short') playPattern(ph.tone, 4);
+  if (ph.popup) openModal({ type: 'alert', id: tag.id });
+  else toast(tag.name + ' is out of range!');
 }
-const phoneTone = (tag) => (tag.settings.tone === 6 ? 5 : tag.settings.tone);
+const phoneTone = () => store.phone.tone;
 
 // While the app is open, keep looking for the tag and reconnect by itself
 // as soon as it's back in range.
@@ -269,7 +277,7 @@ async function keepTrying(tag) {
   if (reconnecting.has(tag.id)) return;
   reconnecting.add(tag.id);
   let attempt = 0;
-  render();
+  softRender();
   while (tagById(tag.id) && !isConnected(tag.id) && !userClosed.has(tag.id)) {
     const conn = live.get(tag.id);
     if (!conn) break;
@@ -289,7 +297,7 @@ async function keepTrying(tag) {
     } catch { /* still away; try again */ }
   }
   reconnecting.delete(tag.id);
-  render();
+  softRender();
 }
 
 // If we stop hearing the tag's once-a-second message, the link is stuck:
@@ -308,7 +316,7 @@ function watchdog() {
 function onBack(tag) {
   ui.down.delete(tag.id);
   const quietFix = ui.recovering.delete(tag.id);
-  if (quietFix) { render(); return; }     // a quick hiccup, fixed without bothering anyone
+  if (quietFix) { softRender(); return; }     // a quick hiccup, fixed without bothering anyone
   notify(tag.name + ' is back!', 'Back in range.');
   const waited = ui.untilBack.delete(tag.id);
   if (waited && ui.untilBack.size === 0) stopAlarm();
@@ -316,7 +324,7 @@ function onBack(tag) {
   ui.queue = ui.queue.filter((m) => !(m.type === 'alert' && m.id === tag.id));
   if (waited) openModal({ type: 'back', id: tag.id });
   else toast(tag.name + ' is back in range.');
-  render();
+  softRender();
 }
 
 // ===========================================================================
@@ -421,6 +429,7 @@ const ICONS = {
   walk: '<circle cx="13" cy="4" r="2"/><path d="M10 22l2-7 3 3v6M8 12l3-4 4 2 3 3M11 8l-1 5"/>',
   phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
   sparkle: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M6 18l2.5-2.5M15.5 8.5L18 6"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/>',
   heart: '<path d="M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 10c0 5.5-7 10-7 10z"/>',
 };
 const icon = (name, size = 24, extra = '') =>
@@ -569,12 +578,27 @@ function draftFor(tag, key) {
   return ui.draft;
 }
 
-// ----- Home -----
+// ----- Zone headers: every page says whose settings these are -----
+const ZONE = {
+  phone: { label: 'My Phone', ic: 'phone' },
+  tag: { label: 'My Tags', ic: 'tag' },
+  settings: { label: 'Settings', ic: 'gear' },
+};
+const badge = (zone, text) => `<span class="zone-badge">${icon(ZONE[zone].ic, 16)}${esc(text || ZONE[zone].label)}</span>`;
+function zoneHead(zone, title, sub, right = '', badgeText = '') {
+  return `<header class="zone-head">
+    ${badge(zone, badgeText)}
+    <div class="zh-row"><h1>${title}</h1>${right}</div>
+    ${sub ? `<p class="lead">${sub}</p>` : ''}
+  </header>`;
+}
+
+// ----- My Tags (home) -----
 function viewHome() {
   const support = bluetoothSupport();
   if (!store.tags.length) {
     return `
-      <header class="hello"><div><p class="eyebrow">Tether</p><h1>Hello!</h1></div></header>
+      ${zoneHead('tag', 'Hello!', '', '', 'Welcome to Tether')}
       <section class="card welcome">
         <div class="art" aria-hidden="true"><span class="ring"></span><span class="ring"></span><span class="ring"></span><span class="core">${icon('phone')}</span></div>
         <h2 class="h2">Never leave your phone behind</h2>
@@ -585,24 +609,24 @@ function viewHome() {
       </section>`;
   }
   const all = store.tags;
-  const away = all.filter((t) => !isConnected(t.id) && (t.lastSeenAt || t.lastSeen));
+  const away = all.filter((t) => !isConnected(t.id) && live.has(t.id) && (t.lastSeenAt || t.lastSeen));
   const pausedAll = all.every((t) => isPaused(t) || status.get(t.id)?.dnd);
-  let summary;
+  let summary = '';
   if (pausedAll) {
     const until = Math.max(...all.map((t) => t.pausedUntil));
     summary = `<section class="summary k-paused"><span class="sum-icon">${icon('moon', 26)}</span>
       <span class="grow"><b>Alerts are paused</b><span>${until > Date.now() ? 'Until ' + clock(until) : 'For now'}</span></span>
       <button type="button" class="btn purple" data-action="resume-all">Turn back on</button></section>`;
   } else if (all.some((t) => !t.demo && !live.has(t.id))) {
-    summary = `<section class="summary k-paused"><span class="sum-icon">${icon('bt', 26)}</span>
-      <span class="grow"><b>Tap Connect to link up</b><span>After the app restarts, tap Connect once on each tag. Then it reconnects by itself.</span></span></section>`;
+    summary = `<section class="summary k-idle"><span class="sum-icon">${icon('bt', 26)}</span>
+      <span class="grow"><b>Tap Connect to link up</b><span>After the app restarts, tap Connect once. Then it reconnects by itself.</span></span></section>`;
   } else if (away.length) {
     summary = `<section class="summary k-away"><span class="sum-icon">${icon('alert', 26)}</span>
-      <span class="grow"><b>${esc(away.map((t) => t.name).join(' and '))} ${away.length === 1 ? 'is' : 'are'} out of range</b><span>Did you leave ${away.length === 1 ? 'it' : 'them'} behind?</span></span></section>`;
+      <span class="grow"><b>${esc(away.map((t) => t.name).join(' and '))} ${away.length === 1 ? 'is' : 'are'} out of range</b><span>Looking for ${away.length === 1 ? 'it' : 'them'}. ${away.length === 1 ? 'It reconnects' : 'They reconnect'} by itself when back.</span></span></section>`;
   } else if (all.some((t) => isConnected(t.id))) {
     summary = `<section class="summary k-good"><span class="sum-icon">${icon('check', 26)}</span>
       <span class="grow"><b>All good!</b><span>${all.length === 1 ? 'Your tag is' : 'Your tags are'} connected and watching.</span></span></section>`;
-  } else summary = '';
+  }
 
   const cards = all.map((tag) => {
     const s = tagStatus(tag);
@@ -625,10 +649,7 @@ function viewHome() {
   }).join('');
 
   return `
-    <header class="hello">
-      <div><p class="eyebrow">Tether</p><h1>Your things</h1></div>
-      ${pausedAll ? '' : `<button type="button" class="btn purple" data-action="open-pause">${icon('pause', 20)}Pause</button>`}
-    </header>
+    ${zoneHead('tag', 'My Tags', 'Your tags and what they do.', pausedAll ? '' : `<button type="button" class="btn purple" data-action="open-pause">${icon('pause', 20)}Pause</button>`)}
     ${support.ok ? '' : `<p class="note k-away">${esc(support.reason)}</p>`}
     ${summary}
     <div class="tag-grid">${cards}
@@ -636,7 +657,7 @@ function viewHome() {
     </div>`;
 }
 
-// ----- One tag -----
+// ----- One tag: everything the TAG does -----
 const STYLE_CHOICES = [
   { v: 0, label: 'Beep', ic: 'ring', c: 'orange' },
   { v: 2, label: 'Flash', ic: 'flash', c: 'yellow' },
@@ -651,7 +672,6 @@ function viewTag(tag) {
   const s = tagStatus(tag);
   const set = tag.settings;
   const paused = isPaused(tag) || st?.dnd;
-  const feet = rssiToFeet(set.threshold);
   const quietOn = tag.quiet.map((q, i) => ({ ...q, name: tag.quietNames[i] })).filter((q) => q.days);
 
   const tiles = [
@@ -668,7 +688,6 @@ function viewTag(tag) {
   const choices = STYLE_CHOICES.map((c) =>
     `<button type="button" class="tile ${styleShown(set.style) === c.v ? 'on' : ''}" aria-pressed="${styleShown(set.style) === c.v}" data-action="quick-style" data-v="${c.v}"><span class="ti ${c.c}">${icon(c.ic)}</span>${c.label}</button>`).join('');
 
-  // Anything that would keep the tag quiet?
   const problems = [];
   if (connected && st && !tag.demo && !st.phoneConnected) problems.push(`<li><b>Pair the tag with this phone too.</b> Open your phone's Settings › Connected devices › Pair new device, then tap <b>${esc(tag.deviceName)}</b>.</li>`);
   if (connected && st?.quiet) problems.push('<li><b>It\'s quiet time right now.</b> <button type="button" class="link-btn" data-action="quiet-off">Turn quiet times off</button></li>');
@@ -681,8 +700,9 @@ function viewTag(tag) {
       : `<div class="check k-good">${icon('check', 22)}<span><b>All set!</b> The tag will ${verb} when you get too far from your phone.</span></div>`;
 
   return `
-    ${back('#/home', 'Home')}
+    ${back('#/home', 'My Tags')}
     <div class="narrow">
+    ${badge('tag', 'Tag settings & alerts')}
     <section class="card tag-hero hero-${s.k}">
       ${avatar(tag, 'xl')}
       <h1>${esc(tag.name)}</h1>
@@ -700,21 +720,23 @@ function viewTag(tag) {
     </section>
 
     <nav class="card setting-list" aria-label="Tag settings">
-      <a class="setting-row" href="#/tag/${enc(tag.id)}/distance"><span class="ti orange" style="width:2.8rem;height:2.8rem;border-radius:1rem;display:grid;place-items:center">${icon('ruler')}</span>
-        <span class="grow"><b>How far?</b><small>About ${fmtDist(feet)}${set.motionOnly ? ', only while moving' : ''}</small></span>${icon('chev', 24, 'class="chev"')}</a>
-      <a class="setting-row" href="#/tag/${enc(tag.id)}/sound"><span class="ti yellow" style="width:2.8rem;height:2.8rem;border-radius:1rem;display:grid;place-items:center">${icon('music')}</span>
-        <span class="grow"><b>Which sound?</b><small>${esc(TONES[set.tone]?.name)}, ${set.repeat ? set.repeat === 1 ? 'once' : set.repeat + ' times' : 'until it\'s back'}</small></span>${icon('chev', 24, 'class="chev"')}</a>
-      <a class="setting-row" href="#/tag/${enc(tag.id)}/quiet"><span class="ti purple" style="width:2.8rem;height:2.8rem;border-radius:1rem;display:grid;place-items:center">${icon('moon')}</span>
-        <span class="grow"><b>Quiet times</b><small>${quietOn.length ? esc(quietOn.map((q) => `${q.name} ${fmtMin(q.start)}–${fmtMin(q.end)}`).join(', ')) : 'None set'}</small></span>${icon('chev', 24, 'class="chev"')}</a>
+      ${settingRow(`#/tag/${enc(tag.id)}/sound`, 'music', 'yellow', 'Which sound?', `${TONES[set.tone]?.name}, volume ${set.volume}, ${set.repeat ? set.repeat === 1 ? 'once' : set.repeat + ' times' : 'until it\'s back'}`)}
+      ${settingRow(`#/tag/${enc(tag.id)}/quiet`, 'moon', 'purple', 'Quiet times', quietOn.length ? quietOn.map((q) => `${q.name} ${fmtMin(q.start)}–${fmtMin(q.end)}`).join(', ') : 'None set')}
+      ${settingRow(`#/distance/${enc(tag.id)}`, 'ruler', 'orange', 'How far?', `About ${fmtDist(rssiToFeet(set.threshold))} · in Settings`)}
     </nav>
 
+    <section class="card pad stack">
+      <h2 class="h2">The tag's button</h2>
+      <ul class="help-list">
+        <li><span class="key">Press once</span><span>Stop the beeping</span></li>
+        <li><span class="key">Press twice</span><span>Ring your phone</span></li>
+        <li><span class="key">Hold down</span><span>Pause alerts for ${set.holdDnd >= 60 ? (set.holdDnd / 60) + (set.holdDnd === 60 ? ' hour' : ' hours') : set.holdDnd + ' minutes'}</span></li>
+      </ul>
+    </section>
+
     <details class="card more">
-      <summary>More settings ${icon('chev', 22, 'class="caret"')}</summary>
+      <summary>Name, remove and more ${icon('chev', 22, 'class="caret"')}</summary>
       <div class="more-body">
-        ${toggle('tag-motion', set.motionOnly, 'Only beep while the tag is moving', 'Stops beeps when your keys sit on a table. Testing by walking away with your phone instead? Turn this off.')}
-        ${toggle('phone-leave', tag.phone.leave, 'Pop up on this phone too', 'Shows a big alert here when the tag goes out of range (while this app is open)')}
-        ${toggle('phone-alarm', tag.phone.alarm, 'Ring this phone loudly', 'Instead of one short sound')}
-        ${toggle('phone-location', tag.phone.saveLocation, 'Remember where it was last seen', 'Kept only on this phone')}
         <label class="field"><span>Name</span><input type="text" value="${esc(tag.name)}" data-bind="rename" maxlength="30"></label>
         <p class="small muted">Bluetooth name: ${esc(tag.deviceName)}${tag.demo ? ' (pretend tag)' : ''}${connected && st?.rssi ? ` · signal ${st.rssi} dBm` : ''}</p>
         ${tag.demo && connected ? `<button type="button" class="btn soft wide" data-action="demo-loss" data-id="${esc(tag.id)}">${icon('walk', 20)}Pretend I walked away</button>` : ''}
@@ -727,12 +749,60 @@ function viewTag(tag) {
     </div>`;
 }
 
+function settingRow(href, ic, color, title, sub) {
+  return `<a class="setting-row" href="${href}"><span class="ti ${color} row-icon">${icon(ic)}</span>
+    <span class="grow"><b>${esc(title)}</b><small>${esc(sub)}</small></span>${icon('chev', 24, 'class="chev"')}</a>`;
+}
+
 function toggle(bind, on, title, sub, extra = '') {
   return `<label class="toggle"><span class="grow"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>
     <input type="checkbox" class="switch" role="switch" data-bind="${bind}" ${extra} ${on ? 'checked' : ''}></label>`;
 }
 
-// ----- How far -----
+// ----- My Phone: everything THIS PHONE does -----
+const PHONE_SOUNDS = [0, 1, 4, 5];
+function viewPhone() {
+  const ph = store.phone;
+  const notif = 'Notification' in window ? Notification.permission : 'unsupported';
+  const withSpots = store.tags.filter((t) => t.lastSeen || t.lastSeenAt);
+  const soundOpt = (v, l) => `<button type="button" class="seg ${ph.sound === v ? 'on' : ''}" aria-pressed="${ph.sound === v}" data-action="phone-sound" data-v="${v}">${l}</button>`;
+  return `
+    ${zoneHead('phone', 'My Phone', 'What <b>this phone</b> does when a tag goes out of range.')}
+    <div class="narrow">
+    <section class="card pad stack">
+      <h2 class="h2">When a tag goes out of range, my phone will…</h2>
+      ${toggle('ph-popup', ph.popup, 'Show a big alert on the screen', 'With buttons to silence it or pause alerts')}
+      <div class="stack tight">
+        <b>Play a sound</b>
+        <div class="seg-row">${soundOpt('off', 'No sound')}${soundOpt('short', 'Once')}${soundOpt('loud', 'Keep ringing')}</div>
+      </div>
+      ${'vibrate' in navigator ? toggle('ph-vibrate', ph.vibrate, 'Vibrate', '') : ''}
+      ${toggle('ph-notify', notif === 'granted' && ph.notify, 'Send a notification', notif === 'denied' ? 'Blocked. Turn notifications on in Chrome\'s site settings.' : notif === 'unsupported' ? 'This browser can\'t show notifications' : 'Shows up even if you\'re in another app', notif === 'denied' || notif === 'unsupported' ? 'disabled' : '')}
+      <button type="button" class="btn soft wide" data-action="test-phone">${icon('sparkle', 20)}Test my phone's alert</button>
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">My phone's alarm sound</h2>
+      <p class="muted">Also plays when you press the tag's button twice to find your phone.</p>
+      <div class="sound-grid">${PHONE_SOUNDS.map((t) => `
+        <label class="sound-card ${ph.tone === t ? 'on' : ''}">
+          <input type="radio" name="ph-tone" value="${t}" data-bind="ph-tone" ${ph.tone === t ? 'checked' : ''}>
+          <b>${TONES[t].name}</b><small>${esc(TONES[t].note)}</small>
+          <button type="button" class="play" aria-label="Listen to ${TONES[t].name}" data-action="listen" data-tone="${t}">${icon('play', 18)}</button>
+        </label>`).join('')}</div>
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">Remember where tags were left</h2>
+      ${toggle('ph-location', ph.saveLocation, 'Save the spot when a tag goes out of range', 'Uses this phone\'s location. Kept only on this phone.')}
+      ${withSpots.length ? `<div class="setting-list inset">${withSpots.map((t) => settingRow(`#/tag/${enc(t.id)}/lastseen`, 'pin', 'blue', t.name, 'Last seen ' + timeAgo(t.lastSeenAt || t.lastSeen?.time))).join('')}</div>` : '<p class="small muted">No spots saved yet.</p>'}
+    </section>
+
+    <p class="note k-idle">${icon('phone', 18)}<span>Phone alerts work while the Tether app is open (it can be in the background). The tag's own beep works even when the app is closed.</span></p>
+    </div>`;
+}
+
+// ----- How far (in Settings) -----
 const ZONES = [
   { name: 'Very close', feet: 15, hint: 'A few steps away', ic: 'near' },
   { name: 'Leave the room', feet: 30, hint: 'Out the door', ic: 'door' },
@@ -749,12 +819,19 @@ function viewDistance(tag) {
   const tiles = ZONES.map((z) => `<button type="button" class="tile ${zone === z ? 'on' : ''}" aria-pressed="${zone === z}" data-action="zone" data-feet="${z.feet}">
     <span class="ti orange">${icon(z.ic)}</span><b>${z.name}</b><small>${z.hint}</small></button>`).join('');
   const unitBtn = (u, l) => `<button type="button" class="seg ${store.units === u ? 'on' : ''}" aria-pressed="${store.units === u}" data-action="unit" data-unit="${u}">${l}</button>`;
+  const chips = store.tags.length > 1
+    ? `<div class="chip-row" role="group" aria-label="Which tag">${store.tags.map((t) => `<a class="chip ${t.id === tag.id ? 'on' : ''}" href="#/distance/${enc(t.id)}" ${t.id === tag.id ? 'aria-current="true"' : ''}>${esc(t.name)}</a>`).join('')}</div>` : '';
   return `
-    ${back('#/tag/' + enc(tag.id), tag.name)}
+    ${back('#/settings', 'Settings')}
     <div class="narrow">
-    <header><h1>How far?</h1><p class="lead">How far can you walk from your phone before the tag beeps?</p></header>
+    ${zoneHead('settings', 'How far?', `How far can you walk from your phone before ${esc(tag.name)} alerts?`)}
+    ${chips}
     ${notConnectedNote(tag)}
     <div class="dist-grid">${tiles}</div>
+
+    <section class="card pad stack">
+      ${toggle('draft-motionOnly', d.motionOnly, 'Only alert while the tag is moving', 'Fewer alerts when your keys sit on a table. Turn off to alert even when the tag is still.')}
+    </section>
 
     <section class="card pad stack">
       <h2 class="h2">Set it by walking</h2>
@@ -762,7 +839,7 @@ function viewDistance(tag) {
       <ol class="steps-list">
         <li>Leave your phone where it usually sits.</li>
         <li>Tap the button below.</li>
-        <li>Walk to where you want the beep, and press the tag's button once.</li>
+        <li>Walk to where you want the alert, and press the tag's button once.</li>
       </ol>
       <button type="button" class="btn dark wide" data-action="calibrate" ${st?.calibrating ? 'disabled' : ''}>${icon('walk', 22)}${st?.calibrating ? 'Waiting for you to press the tag…' : 'Start the walk test'}</button>
     </section>
@@ -775,7 +852,6 @@ function viewDistance(tag) {
         <label class="sr-only" for="dist">Distance</label>
         <input id="dist" type="range" min="10" max="150" step="5" value="${feet}" data-bind="feet">
         <p class="small muted">Bluetooth guesses distance from signal strength, so walls and pockets change it. The walk test is more accurate.</p>
-        ${toggle('draft-motionOnly', d.motionOnly, 'Only beep while the tag is moving', 'Stops beeps when your keys sit on a table')}
       </div>
     </details>
     <div class="save-bar"><button type="button" class="btn big primary" data-action="save-settings">Save</button></div>
@@ -797,6 +873,7 @@ function viewSound(tag) {
   return `
     ${back('#/tag/' + enc(tag.id), tag.name)}
     <div class="narrow">
+    ${badge('tag', 'Tag settings · ' + tag.name)}
     <header><h1>Which sound?</h1><p class="lead">Tap a sound to pick it. Tap ${icon('play', 14)} to listen.</p></header>
     ${notConnectedNote(tag)}
     <div class="sound-grid" role="radiogroup" aria-label="Sound">${cards}</div>
@@ -854,6 +931,7 @@ function viewQuiet(tag) {
   return `
     ${back('#/tag/' + enc(tag.id), tag.name)}
     <div class="narrow">
+    ${badge('tag', 'Tag settings · ' + tag.name)}
     <header><h1>Quiet times</h1><p class="lead">Times when ${esc(tag.name)} should not beep.</p></header>
     ${notConnectedNote(tag)}
     <section class="card pad stack">
@@ -880,15 +958,20 @@ function viewQuiet(tag) {
 }
 
 // ----- Find -----
+function findLevel(tag) {
+  if (!isConnected(tag.id)) return 0;
+  return Math.max(1, Math.min(5, Math.round(((status.get(tag.id)?.rssi || -92) + 97) / 9)));
+}
+const findTrend = () => '';
 function viewFind(id) {
   const tags = store.tags;
   const sel = tagById(id) || tags.find((t) => isConnected(t.id)) || tags[0];
   if (!sel) {
-    return `<header><h1>Find</h1></header><section class="card welcome"><p class="muted">Add a tag first, then you can find it here.</p><a class="btn big primary" href="#/add">${icon('plus', 22)}Add a tag</a></section>`;
+    return `${zoneHead('tag', 'Find', '')}<section class="card welcome"><p class="muted">Add a tag first, then you can find it here.</p><a class="btn big primary" href="#/add">${icon('plus', 22)}Add a tag</a></section>`;
   }
   const st = status.get(sel.id);
   const connected = isConnected(sel.id);
-  const level = connected ? Math.max(1, Math.min(5, Math.round(((st?.rssi || -92) + 97) / 9))) : 0;
+  const level = findLevel(sel);
   const HEAT = [
     { w: 'Out of range', c: '#9C92A3', t: 'Walk around until it connects, or check where it was last seen.' },
     { w: 'Cold', c: '#1F63B5', t: 'It\'s far away. Keep walking.' },
@@ -899,7 +982,7 @@ function viewFind(id) {
   ][level];
   const chips = tags.map((t) => `<a class="chip ${t.id === sel.id ? 'on' : ''}" href="#/find/${enc(t.id)}" ${t.id === sel.id ? 'aria-current="true"' : ''}>${esc(t.name)}</a>`).join('');
   return `
-    <header><h1>Find</h1><p class="lead">Walk around slowly. The circle heats up as you get closer.</p></header>
+    ${zoneHead('tag', 'Find', 'Walk around slowly. The circle heats up as you get closer.')}
     <div class="chip-row" role="group" aria-label="Which tag">${chips}</div>
     <section class="card radar-card" style="--heat:${HEAT.c}" aria-live="polite">
       <div class="radar ${connected ? '' : 'off'}" aria-hidden="true"><span class="wave"></span><span class="wave"></span><span class="wave"></span><span class="core">${icon(kindFor(sel.name))}</span></div>
@@ -932,6 +1015,7 @@ function viewLastSeen(tag) {
   return `
     ${back('#/tag/' + enc(tag.id), tag.name)}
     <div class="narrow">
+    ${badge('phone', 'Saved by my phone')}
     <header><h1>Where was it?</h1><p class="lead">${isConnected(tag.id) ? esc(tag.name) + ' is connected right now.' : 'Last seen ' + esc(timeAgo(tag.lastSeenAt || ls?.time) || 'never')}</p></header>
     <figure class="card map-wrap">${map}${ls ? `<figcaption>Where your phone was when it lost ${esc(tag.name)}${ls.acc ? ` (within about ${fmtDist(Math.round(ls.acc * 3.28))})` : ''}</figcaption>` : ''}</figure>
     <div class="row">
@@ -975,89 +1059,131 @@ function viewAdd() {
     </div>`;
 }
 
-// ----- Settings -----
+// ----- Settings: general things -----
 function viewSettings() {
-  const notif = 'Notification' in window ? Notification.permission : 'unsupported';
   const sizes = [['m', 'Regular', '1.3rem'], ['l', 'Large', '1.7rem'], ['xl', 'Extra large', '2.1rem']];
+  const anyPaused = store.tags.some((t) => isPaused(t) || status.get(t.id)?.dnd);
+  const until = Math.max(0, ...store.tags.map((t) => t.pausedUntil));
   return `
-    <header><h1>Settings</h1></header>
+    ${zoneHead('settings', 'Settings', 'Distance, pausing and how the app looks.')}
     <div class="narrow">
     <section class="card pad stack">
-      <h2 class="h2">Text size</h2>
-      <div class="size-row">${sizes.map(([v, l, fs]) => `<button type="button" class="size-btn ${store.textSize === v ? 'on' : ''}" aria-pressed="${store.textSize === v}" data-action="text-size" data-v="${v}"><span class="aa" style="font-size:${fs}">Aa</span>${l}</button>`).join('')}</div>
+      <h2 class="h2">How far before it alerts?</h2>
+      ${store.tags.length
+        ? `<div class="setting-list inset">${store.tags.map((t) => settingRow(`#/distance/${enc(t.id)}`, 'ruler', 'orange', t.name, 'About ' + fmtDist(rssiToFeet(t.settings.threshold)) + (t.settings.motionOnly ? ', only while moving' : ''))).join('')}</div>`
+        : '<p class="muted">Add a tag first.</p>'}
     </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">Pause all alerts</h2>
+      <p class="muted">${anyPaused ? `Paused${until > Date.now() ? ' until ' + clock(until) : ''}. Tags and your phone stay quiet.` : 'Quiet for a while, on your tags and your phone. They turn back on by themselves.'}</p>
+      ${anyPaused
+        ? '<button type="button" class="btn good wide" data-action="resume-all">Turn alerts back on</button>'
+        : `<div class="seg-row">${PAUSES.map((p) => `<button type="button" class="seg" data-action="pause-all" data-min="${p.min}">${p.label}</button>`).join('')}</div>`}
+    </section>
+
     <section class="card pad stack">
       <h2 class="h2">Distances in</h2>
       <div class="seg-row">${[['ft', 'Feet'], ['yd', 'Yards'], ['m', 'Meters']].map(([u, l]) => `<button type="button" class="seg ${store.units === u ? 'on' : ''}" aria-pressed="${store.units === u}" data-action="unit" data-unit="${u}">${l}</button>`).join('')}</div>
     </section>
+
     <section class="card pad stack">
-      <h2 class="h2">Pause all alerts</h2>
-      <button type="button" class="btn purple wide" data-action="open-pause">${icon('pause', 20)}Pause for 1 hour, 3 hours or all day</button>
+      <h2 class="h2">Text size</h2>
+      <div class="size-row">${sizes.map(([v, l, fs]) => `<button type="button" class="size-btn ${store.textSize === v ? 'on' : ''}" aria-pressed="${store.textSize === v}" data-action="text-size" data-v="${v}"><span class="aa" style="font-size:${fs}">Aa</span>${l}</button>`).join('')}</div>
     </section>
-    <section class="card pad stack">
-      <h2 class="h2">Notifications</h2>
-      <p class="muted">${notif === 'granted' ? 'On. You\'ll get a notification when a tag goes out of range.' : notif === 'denied' ? 'Blocked. Turn them on in your browser\'s site settings.' : notif === 'unsupported' ? 'This browser can\'t show notifications.' : 'Get a notification when a tag goes out of range.'}</p>
-      ${notif === 'default' ? '<button type="button" class="btn soft wide" data-action="notif">Turn on notifications</button>' : ''}
-    </section>
-    <section class="card pad stack">
-      <h2 class="h2">The tag's buttons</h2>
-      <ul class="help-list">
-        <li><span class="key">Press once</span><span>Stop the beeping</span></li>
-        <li><span class="key">Press twice</span><span>Ring your phone (app open)</span></li>
-        <li><span class="key">Hold down</span><span>Pause alerts for a while</span></li>
-      </ul>
-    </section>
+
     <section class="card pad stack">
       <h2 class="h2">Put it on your home screen</h2>
       <p class="muted">${matchMedia('(display-mode: standalone)').matches ? 'Done! Open Tether from your home screen.' : 'In Chrome, tap the ⋮ menu and choose <b>Add to Home screen</b>. On a computer, click <b>Install</b> in the address bar.'}</p>
       ${ui.installPrompt ? '<button type="button" class="btn soft wide" data-action="install">Install Tether</button>' : ''}
     </section>
+
     <section class="card pad stack">
       <h2 class="h2">Privacy</h2>
       <p class="muted">${icon('lock', 16)} No account, no cloud. Everything stays on this phone.</p>
       <button type="button" class="btn ghost danger" data-action="forget-all">Remove all tags from this phone</button>
     </section>
-    <p class="small muted center">Tether prototype 0.2</p>
+    <p class="small muted center">Tether prototype 0.3</p>
     </div>`;
 }
 
 // ===========================================================================
 // Render
+//
+// The tag reports in every second. Redrawing the page that often makes it
+// jump while you scroll, so the page is only redrawn when something you can
+// see has changed, never while your finger is on the screen, and always at
+// the same scroll position.
 // ===========================================================================
+function pageKey() {
+  const r = route();
+  const tags = store.tags.map((t) => {
+    const st = status.get(t.id);
+    const s = tagStatus(t);
+    return [t.id, t.name, isConnected(t.id), s.k, s.short, s.text, st?.alerting, st?.dnd, st?.quiet, st?.calibrating,
+      st?.hasRecording, st?.phoneConnected, t.pausedUntil, !!t.lastSeen, t.settings.threshold, r.page === 'find' ? findLevel(t) + findTrend(t) : 0].join('|');
+  });
+  return [location.hash, store.textSize, store.units, ui.untilBack.size, tags.join('/')].join('#');
+}
+
+let lastKey = '';
+let pendingRender = false;
+// Background updates: only redraw if something visible changed, and not mid-scroll
+function softRender() {
+  if (ui.touching || Date.now() - ui.lastScroll < 900 || ui.editing || ui.recorder) { pendingRender = true; return; }
+  const f = document.activeElement;
+  if (f && /^(INPUT|SELECT|TEXTAREA)$/.test(f.tagName) && !['checkbox', 'radio'].includes(f.type)) { pendingRender = true; return; }
+  if (pageKey() === lastKey) return;
+  render();
+}
+function flushRender() { if (pendingRender) { pendingRender = false; softRender(); } }
+
 function render() {
+  pendingRender = false;
   document.documentElement.dataset.size = store.textSize;
   const r = route();
   const tag = r.id ? tagById(r.id) : null;
   if (r.page !== 'add') ui.pending = null;
-  if (r.page === 'tag' && !tag) { go('#/home'); return; }
-  let html;
+  if ((r.page === 'tag' || r.page === 'distance') && !tag) { go(r.page === 'distance' ? '#/settings' : '#/home'); return; }
+  let html, zone;
   if (r.page === 'tag') {
-    if (r.sub === 'distance') html = viewDistance(tag);
-    else if (r.sub === 'sound') html = viewSound(tag);
+    zone = 'tag';
+    if (r.sub === 'sound') html = viewSound(tag);
     else if (r.sub === 'quiet') html = viewQuiet(tag);
     else if (r.sub === 'lastseen') html = viewLastSeen(tag);
     else { ui.draftKey = ''; html = viewTag(tag); }
-  } else {
+  } else if (r.page === 'distance') { zone = 'settings'; html = viewDistance(tag); }
+  else {
     ui.draftKey = '';
-    if (r.page === 'add') html = viewAdd();
-    else if (r.page === 'find') html = viewFind(r.id);
-    else if (r.page === 'settings') html = viewSettings();
-    else html = viewHome();
+    if (r.page === 'phone') { zone = 'phone'; html = viewPhone(); }
+    else if (r.page === 'settings') { zone = 'settings'; html = viewSettings(); }
+    else if (r.page === 'add') { zone = 'tag'; html = viewAdd(); }
+    else if (r.page === 'find') { zone = 'tag'; html = viewFind(r.id); }
+    else { zone = 'tag'; html = viewHome(); }
   }
+  document.body.dataset.zone = zone;
+
   const view = $('#view');
+  const samePage = ui.renderedHash === location.hash;
+  const y = window.scrollY;
   const openDetails = [...view.querySelectorAll('details[open] > summary')].map((s) => s.textContent.trim());
   const focusedBind = document.activeElement?.dataset?.bind;
   const focusedAction = document.activeElement?.dataset?.action;
   view.innerHTML = html;
-  view.querySelectorAll('details > summary').forEach((s) => { if (openDetails.includes(s.textContent.trim())) s.parentElement.open = true; });
-  if (focusedBind) view.querySelector(`[data-bind="${focusedBind}"]`)?.focus();
-  else if (focusedAction && !ui.modal) view.querySelector(`[data-action="${focusedAction}"]`)?.focus({ preventScroll: true });
+  if (samePage) {
+    view.querySelectorAll('details > summary').forEach((s) => { if (openDetails.includes(s.textContent.trim())) s.parentElement.open = true; });
+    if (focusedBind) view.querySelector(`[data-bind="${focusedBind}"]`)?.focus({ preventScroll: true });
+    else if (focusedAction && !ui.modal) view.querySelector(`[data-action="${focusedAction}"]`)?.focus({ preventScroll: true });
+    window.scrollTo(0, y);
+  }
+  ui.renderedHash = location.hash;
+  lastKey = pageKey();
 
   const names = [...ui.untilBack].map((id) => tagById(id)?.name).filter(Boolean);
   $('#banner').innerHTML = names.length
     ? `<div class="banner" role="status"><span class="bell">${icon('ring', 24)}</span><span class="grow">Alerting until ${esc(names.join(' and '))} ${names.length === 1 ? 'is' : 'are'} back</span><button type="button" class="btn" data-action="stop-until-back">Stop</button></div>`
     : '';
-  const tab = r.page === 'tag' || r.page === 'add' ? 'home' : r.page;
+  const tab = zone === 'tag' ? 'home' : zone;
   document.querySelectorAll('[data-tab]').forEach((a) => {
     const on = a.dataset.tab === tab;
     a.classList.toggle('on', on);
@@ -1090,6 +1216,17 @@ const actions = {
   'open-pause'(el) { openModal({ type: 'pause', id: el.dataset.id || null }); },
   async 'resume-all'() { await pauseMany(store.tags, 0); },
   async resume(el) { await pauseMany([tagById(el.dataset.id)], 0); },
+  async 'pause-all'(el) { await pauseMany(store.tags, Number(el.dataset.min)); },
+  'phone-sound'(el) { store.phone.sound = el.dataset.v; save(); if (el.dataset.v !== 'off') playPattern(store.phone.tone, 4); render(); },
+  'test-phone'() {
+    const ph = store.phone;
+    if (ph.vibrate) navigator.vibrate?.([300, 120, 300]);
+    if (ph.notify) notify('This is a test', 'This is how Tether alerts you.');
+    if (ph.sound === 'loud') startAlarm(ph.tone, { limitMs: 6000 });
+    else if (ph.sound === 'short') playPattern(ph.tone, 4);
+    if (ph.popup) toast('This is how your phone will alert you.', 'Stop', stopAlarm);
+    else toast('Test sent. The big on-screen alert is turned off.');
+  },
   async 'pause-one'(el) { await pauseMany([tagById(route().id)], Number(el.dataset.min)); },
 
   // Popup buttons
@@ -1103,7 +1240,7 @@ const actions = {
   'm-until-back'() {
     const tag = tagById(ui.modal.id);
     ui.untilBack.add(tag.id);
-    startAlarm(phoneTone(tag), { gapMs: 4000, limitMs: 60 * 60000 });
+    startAlarm(phoneTone(), { gapMs: 4000, limitMs: 60 * 60000 });
     closeModal();
     render();
     toast('Your phone will keep alerting until ' + tag.name + ' is back.');
@@ -1186,8 +1323,9 @@ const actions = {
   async 'save-settings'() {
     const tag = tagById(route().id);
     tag.settings = { ...ui.draft };
+    const fromSettings = route().page === 'distance';
     await saveTagNow(tag, 'Saved!');
-    go('#/tag/' + enc(tag.id));
+    go(fromSettings ? '#/settings' : '#/tag/' + enc(tag.id));
   },
   async 'save-quiet'() {
     const tag = tagById(route().id);
@@ -1299,10 +1437,17 @@ function onInput(el, final) {
       tag.settings = { ...tag.settings, motionOnly: el.checked };
       saveTagNow(tag, el.checked ? 'The tag only beeps while it\'s moving.' : 'The tag beeps even when it sits still.');
       return;
-    case 'phone-leave': tag.phone.leave = el.checked; save(); return;
-    case 'phone-alarm': tag.phone.alarm = el.checked; save(); return;
-    case 'phone-location':
-      tag.phone.saveLocation = el.checked; save();
+    case 'ph-popup': store.phone.popup = el.checked; save(); return;
+    case 'ph-vibrate': store.phone.vibrate = el.checked; save(); if (el.checked) navigator.vibrate?.(200); return;
+    case 'ph-tone': store.phone.tone = Number(el.value); save(); playPattern(store.phone.tone, 4); render(); return;
+    case 'ph-notify':
+      if (el.checked && 'Notification' in window && Notification.permission !== 'granted') {
+        Notification.requestPermission().then((p) => { store.phone.notify = p === 'granted'; save(); render(); });
+        return;
+      }
+      store.phone.notify = el.checked; save(); return;
+    case 'ph-location':
+      store.phone.saveLocation = el.checked; save();
       if (el.checked && 'geolocation' in navigator) navigator.geolocation.getCurrentPosition(() => {}, () => toast('Location is blocked, so spots can\'t be saved.'));
       return;
     case 'rename': if (final) { tag.name = el.value.trim() || tag.name; save(); render(); } return;
@@ -1334,7 +1479,15 @@ function start() {
   window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); ui.installPrompt = e; });
   // Keep "paused until" and "last seen" times fresh
-  setInterval(() => { if (!ui.editing && !ui.modal) render(); }, 30000);
+  setInterval(() => { if (!ui.modal) softRender(); }, 30000);
+  // Never redraw under a finger or mid-scroll; catch up right after
+  ui.touching = false; ui.lastScroll = 0;
+  addEventListener('touchstart', () => { ui.touching = true; }, { passive: true });
+  const touchEnd = () => { ui.touching = false; setTimeout(flushRender, 950); };
+  addEventListener('touchend', touchEnd, { passive: true });
+  addEventListener('touchcancel', touchEnd, { passive: true });
+  addEventListener('scroll', () => { ui.lastScroll = Date.now(); clearTimeout(ui.scrollT); ui.scrollT = setTimeout(flushRender, 950); }, { passive: true });
+  document.addEventListener('focusout', () => setTimeout(flushRender, 300));
 
   // Pretend tags come back each time; real tags reconnect if Chrome remembers them
   for (const tag of store.tags) {
@@ -1360,7 +1513,7 @@ function start() {
     ui.visibleSince = Date.now();
     for (const tag of store.tags) if (live.has(tag.id) && !isConnected(tag.id) && !userClosed.has(tag.id)) keepTrying(tag);
     wakeUp();
-    render();
+    softRender();
   });
   setInterval(watchdog, 2000);
 

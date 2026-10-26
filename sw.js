@@ -1,5 +1,5 @@
 // Lets the app open without a connection after the first visit.
-const CACHE = 'tether-v4';
+const CACHE = 'tether-v5';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'ble.js', 'sounds.js', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); self.skipWaiting(); });
