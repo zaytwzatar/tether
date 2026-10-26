@@ -43,18 +43,21 @@ export function playPattern(tone, volume = 3) {
 }
 
 let alarmTimer = null;
-export function startAlarm(tone = 5) {
+let alarmLimit = null;
+// gapMs: pause between rounds. limitMs: stop by itself after this long.
+export function startAlarm(tone = 5, { gapMs = 500, limitMs = 60000 } = {}) {
   stopAlarm();
   const loop = () => {
     const ms = playPattern(tone, 5);
     if (navigator.vibrate) navigator.vibrate([400, 200, 400]);
-    alarmTimer = setTimeout(loop, ms + 500);
+    alarmTimer = setTimeout(loop, ms + gapMs);
   };
   loop();
-  setTimeout(stopAlarm, 60000); // never ring for more than a minute
+  alarmLimit = setTimeout(stopAlarm, limitMs);
 }
 export function stopAlarm() {
   clearTimeout(alarmTimer);
+  clearTimeout(alarmLimit);
   alarmTimer = null;
   if (navigator.vibrate) navigator.vibrate(0);
 }
