@@ -1,5 +1,8 @@
 # Tether prototype: setup guide
 
+> **Using an M5StickS3?** See [STICKS3-SETUP.md](STICKS3-SETUP.md). This page covers the Circuit Playground Bluefruit.
+
+
 This folder has two parts:
 
 - **firmware/Tether**: the code for the tag (Circuit Playground Bluefruit).

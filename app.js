@@ -1,7 +1,7 @@
 // Tether app: screens, saved data and wiring to the tag.
 import {
   TagConnection, DemoTag, bluetoothSupport, TONES, DEFAULT_SETTINGS, DEFAULT_QUIET,
-  feetToRssi, rssiToFeet, CMD,
+  feetToRssi, rssiToFeet, CMD, THEMES, XF, DEFAULT_EXTRAS, DEFAULT_TEXTS, TEXT_KEY,
 } from './ble.js';
 import { playPattern, startAlarm, stopAlarm, Recorder, playPcm } from './sounds.js';
 
@@ -37,6 +37,9 @@ function load() {
     t.pausedUntil ??= 0;
     t.phone ??= { leave: true, alarm: false, saveLocation: true };
     t.quietNames ??= ['Night', 'Meeting'];
+    t.model ??= 1;
+    t.extras ??= { ...DEFAULT_EXTRAS };
+    t.texts ??= { found: DEFAULT_TEXTS.found, checklist: [...DEFAULT_TEXTS.checklist] };
   });
   return s;
 }
@@ -54,6 +57,9 @@ function newTag(id, deviceName, demo) {
     quietNames: ['Night', 'Meeting'],
     phone: { leave: true, alarm: false, saveLocation: true },
     pausedUntil: 0, lastSeen: null, needsSync: false, addedAt: Date.now(),
+    model: 1, extras: { ...DEFAULT_EXTRAS },
+    texts: { found: DEFAULT_TEXTS.found, checklist: [...DEFAULT_TEXTS.checklist] },
+    stats: null,
   };
 }
 
@@ -87,14 +93,35 @@ function attach(tag, conn) {
 
 // After any (re)connection: send what changed while away, or read the tag's settings
 async function afterConnect(tag) {
+  const conn = live.get(tag.id);
+  tag.model = conn.model || 1;
   if (tag.needsSync || tag.demo) await pushToTag(tag);
   else {
-    const fromTag = await live.get(tag.id).readSettings();
+    const fromTag = await conn.readSettings();
     tag.settings = fromTag.settings;
     tag.quiet = fromTag.quiet;
+    if (conn.hasScreen) {
+      tag.extras = await conn.readExtras().catch(() => tag.extras);
+      await pushTexts(tag).catch(() => {});
+    }
   }
   await syncPause(tag);
+  await refreshStats(tag);
   save();
+}
+
+// Name, "if found" message and checklist live on this phone and are sent to the tag
+async function pushTexts(tag) {
+  const conn = live.get(tag.id);
+  if (!conn?.connected || !conn.hasScreen) return;
+  await conn.writeText(TEXT_KEY.name, tag.name);
+  await conn.writeText(TEXT_KEY.found, tag.texts.found);
+  for (let i = 0; i < 4; i++) await conn.writeText(TEXT_KEY.check0 + i, tag.texts.checklist[i] || '');
+}
+async function refreshStats(tag) {
+  const conn = live.get(tag.id);
+  if (!conn?.connected || !conn.hasScreen) return;
+  try { tag.stats = await conn.readStats(); save(); } catch { /* try later */ }
 }
 
 async function connectTag(tag) {
@@ -120,6 +147,10 @@ async function pushToTag(tag) {
   if (!conn?.connected) { tag.needsSync = true; save(); return false; }
   await conn.writeSettings(tag.settings);
   await conn.writeQuiet(tag.quiet);
+  if (conn.hasScreen) {
+    await conn.writeExtras(tag.extras);
+    await pushTexts(tag);
+  }
   tag.needsSync = false;
   save();
   return true;
@@ -429,6 +460,9 @@ const ICONS = {
   walk: '<circle cx="13" cy="4" r="2"/><path d="M10 22l2-7 3 3v6M8 12l3-4 4 2 3 3M11 8l-1 5"/>',
   phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
   sparkle: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M6 18l2.5-2.5M15.5 8.5L18 6"/>',
+  screen: '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  battery: '<rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 11v2M5 10v4M8 10v4M11 10v4"/>',
+  flame: '<path d="M12 22c4 0 7-3 7-7 0-4-3-6-4-10-2 2-3 4-3 6-1-1-2-2-2-4-2 2-5 5-5 8 0 4 3 7 7 7z"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/>',
   heart: '<path d="M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 10c0 5.5-7 10-7 10z"/>',
 };
@@ -573,7 +607,9 @@ function draftFor(tag, key) {
     ui.draftKey = k;
     ui.draft = key === 'quiet'
       ? { quiet: tag.quiet.map((q) => ({ ...q })), names: [...tag.quietNames], settings: { ...tag.settings } }
-      : { ...tag.settings };
+      : key === 'screen'
+        ? { extras: { ...tag.extras }, texts: { found: tag.texts.found, checklist: [...tag.texts.checklist] } }
+        : { ...tag.settings };
   }
   return ui.draft;
 }
@@ -673,6 +709,8 @@ function viewTag(tag) {
   const set = tag.settings;
   const paused = isPaused(tag) || st?.dnd;
   const quietOn = tag.quiet.map((q, i) => ({ ...q, name: tag.quietNames[i] })).filter((q) => q.days);
+  const screenTag = tag.model >= 2;
+  const holdText = set.holdDnd >= 60 ? (set.holdDnd / 60) + (set.holdDnd === 60 ? ' hour' : ' hours') : set.holdDnd + ' minutes';
 
   const tiles = [
     connected
@@ -708,8 +746,10 @@ function viewTag(tag) {
       <h1>${esc(tag.name)}</h1>
       ${pill(s)}
       <span class="status-line">${esc(s.text)}</span>
+      ${screenTag && tag.stats?.battery != null ? `<span class="hero-batt">${icon('battery', 18)}Tag battery ${tag.stats.battery}%${tag.stats.charging ? ' · charging' : ''}</span>` : ''}
     </section>
     <div class="action-grid">${tiles}</div>
+    ${screenTag && tag.stats ? streakCard(tag) : ''}
 
     <section class="card pad stack">
       <h2 class="h2">When I walk away from my phone, the tag will…</h2>
@@ -722,16 +762,23 @@ function viewTag(tag) {
     <nav class="card setting-list" aria-label="Tag settings">
       ${settingRow(`#/tag/${enc(tag.id)}/sound`, 'music', 'yellow', 'Which sound?', `${TONES[set.tone]?.name}, volume ${set.volume}, ${set.repeat ? set.repeat === 1 ? 'once' : set.repeat + ' times' : 'until it\'s back'}`)}
       ${settingRow(`#/tag/${enc(tag.id)}/quiet`, 'moon', 'purple', 'Quiet times', quietOn.length ? quietOn.map((q) => `${q.name} ${fmtMin(q.start)}–${fmtMin(q.end)}`).join(', ') : 'None set')}
+      ${screenTag ? settingRow(`#/tag/${enc(tag.id)}/screen`, 'screen', 'green', 'Screen & extras', `${THEMES[tag.extras.theme]?.name || 'Orange'} theme, checklist, “if found”, caller ID`) : ''}
       ${settingRow(`#/distance/${enc(tag.id)}`, 'ruler', 'orange', 'How far?', `About ${fmtDist(rssiToFeet(set.threshold))} · in Settings`)}
     </nav>
 
     <section class="card pad stack">
-      <h2 class="h2">The tag's button</h2>
-      <ul class="help-list">
+      <h2 class="h2">The tag's buttons</h2>
+      ${screenTag ? `<ul class="help-list">
+        <li><span class="key">Front, once</span><span>Stop the beeping, or do what the screen says</span></li>
+        <li><span class="key">Front, twice</span><span>Ring your phone</span></li>
+        <li><span class="key">Front, hold</span><span>Pause alerts for ${holdText}</span></li>
+        <li><span class="key">Side, once</span><span>Next screen: find phone, checklist, timer, voice note, camera, flashlight, if found, streak</span></li>
+        <li><span class="key">Side, hold</span><span>Back home, screen off</span></li>
+      </ul>` : `<ul class="help-list">
         <li><span class="key">Press once</span><span>Stop the beeping</span></li>
         <li><span class="key">Press twice</span><span>Ring your phone</span></li>
-        <li><span class="key">Hold down</span><span>Pause alerts for ${set.holdDnd >= 60 ? (set.holdDnd / 60) + (set.holdDnd === 60 ? ' hour' : ' hours') : set.holdDnd + ' minutes'}</span></li>
-      </ul>
+        <li><span class="key">Hold down</span><span>Pause alerts for ${holdText}</span></li>
+      </ul>`}
     </section>
 
     <details class="card more">
@@ -746,6 +793,74 @@ function viewTag(tag) {
         </div>
       </div>
     </details>
+    </div>`;
+}
+
+function streakCard(tag) {
+  const st = tag.stats;
+  const days = st.streak == null ? null : st.streak;
+  return `<section class="card pad streak-card">
+    <span class="flame">${icon('flame', 34)}</span>
+    <span class="grow"><b>${days == null ? 'Streak starts soon' : days + (days === 1 ? ' day' : ' days') + ' without forgetting'}</b>
+      <small>${st.saves} ${st.saves === 1 ? 'save' : 'saves'} · best ${st.best} ${st.best === 1 ? 'day' : 'days'}</small></span>
+  </section>`;
+}
+
+// ----- Screen & extras (StickS3) -----
+function viewScreen(tag) {
+  const d = draftFor(tag, 'screen');
+  const x = d.extras;
+  const flag = (f) => !!(x.flags & f);
+  const seg = (action, val, cur, label) => `<button type="button" class="seg ${cur === val ? 'on' : ''}" aria-pressed="${cur === val}" data-action="${action}" data-v="${val}">${label}</button>`;
+  return `
+    ${back('#/tag/' + enc(tag.id), tag.name)}
+    <div class="narrow">
+    ${badge('tag', 'Tag settings · ' + tag.name)}
+    <header><h1>Screen & extras</h1><p class="lead">What shows on the tag's little screen.</p></header>
+    ${notConnectedNote(tag)}
+
+    <section class="card pad stack">
+      <h2 class="h2">Look</h2>
+      <b>Color</b>
+      <div class="swatches" role="group" aria-label="Color theme">${THEMES.map((t) => `<button type="button" class="swatch ${x.theme === t.id ? 'on' : ''}" style="--sw:${t.color}" aria-label="${t.name}" aria-pressed="${x.theme === t.id}" data-action="sx-theme" data-v="${t.id}"></button>`).join('')}</div>
+      ${toggle('sx-flag', flag(XF.face), 'Show the little face', 'Happy when your phone is near, worried when it\'s not', `data-f="${XF.face}"`)}
+      <b>Brightness</b>
+      <div class="vol-row" role="group" aria-label="Brightness">${[1, 2, 3, 4, 5].map((v) => `<button type="button" class="vol-dot ${x.brightness >= v ? 'on' : ''}" style="height:${1.8 + v * 0.55}rem" aria-label="Brightness ${v} of 5" aria-pressed="${x.brightness === v}" data-action="sx-bright" data-v="${v}">${v === x.brightness ? v : ''}</button>`).join('')}</div>
+      <b>Screen stays on for</b>
+      <div class="seg-row" style="--n:4">${[5, 10, 20, 30].map((v) => seg('sx-secs', v, x.screenSecs, v + ' sec')).join('')}</div>
+      <p class="small muted">Shorter saves battery. The screen also wakes when you press a button or an alert happens.</p>
+      ${toggle('sx-flag', flag(XF.clock24), '24-hour clock', '', `data-f="${XF.clock24}"`)}
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">Before you go</h2>
+      ${toggle('sx-flag', flag(XF.checklist), 'Show my checklist', 'A quick list on the tag\'s screen', `data-f="${XF.checklist}"`)}
+      ${toggle('sx-flag', flag(XF.pickupWake), 'Show it when I pick up my keys', 'After they\'ve sat still for a while', `data-f="${XF.pickupWake}"`)}
+      <div class="check-items">${[0, 1, 2, 3].map((i) => `<label class="field"><span>Item ${i + 1}</span><input type="text" maxlength="18" value="${esc(d.texts.checklist[i] || '')}" data-bind="sx-item" data-i="${i}"></label>`).join('')}</div>
+      <p class="small muted">Tip: if the first item is “Phone”, it ticks itself when your phone is nearby.</p>
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">If found</h2>
+      <label class="field"><span>Message shown on the tag</span>
+        <textarea rows="3" maxlength="80" data-bind="sx-found">${esc(d.texts.found)}</textarea></label>
+      <p class="small muted">${icon('lock', 14)} Anyone who finds your keys can read this. Only add what you're happy to share.</p>
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">From your phone</h2>
+      ${toggle('sx-flag', flag(XF.callerId), 'Caller ID and texts', 'Shows “Mom is calling” on the tag. iPhone only for now.', `data-f="${XF.callerId}"`)}
+      ${toggle('sx-flag', flag(XF.camera), 'Camera remote', 'Press the tag to take a photo with your phone', `data-f="${XF.camera}"`)}
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">Parking timer</h2>
+      <b>Each press adds</b>
+      <div class="seg-row" style="--n:4">${[5, 10, 15, 30].map((v) => seg('sx-step', v, x.timerStep, v + ' min')).join('')}</div>
+    </section>
+
+    ${isConnected(tag.id) ? `<button type="button" class="btn soft wide" data-action="say-hi" data-id="${esc(tag.id)}">${icon('sparkle', 20)}Say hi on the tag's screen</button>` : ''}
+    <div class="save-bar"><button type="button" class="btn big primary" data-action="save-screen">Save</button></div>
     </div>`;
 }
 
@@ -1117,11 +1232,18 @@ function viewSettings() {
 // ===========================================================================
 function pageKey() {
   const r = route();
+  // Settings forms only show "connected or not" (and the walk test), so live
+  // signal changes must not redraw them under the user's finger.
+  if (r.page === 'distance' || (r.page === 'tag' && r.sub && r.sub !== 'lastseen')) {
+    const t = tagById(r.id);
+    const st = t && status.get(t.id);
+    return [location.hash, store.textSize, store.units, ui.untilBack.size, t && isConnected(t.id), st?.calibrating, st?.hasRecording, t?.model, t?.settings.threshold].join('#');
+  }
   const tags = store.tags.map((t) => {
     const st = status.get(t.id);
     const s = tagStatus(t);
     return [t.id, t.name, isConnected(t.id), s.k, s.short, s.text, st?.alerting, st?.dnd, st?.quiet, st?.calibrating,
-      st?.hasRecording, st?.phoneConnected, t.pausedUntil, !!t.lastSeen, t.settings.threshold, r.page === 'find' ? findLevel(t) + findTrend(t) : 0].join('|');
+      st?.hasRecording, st?.phoneConnected, t.pausedUntil, !!t.lastSeen, t.settings.threshold, t.model, JSON.stringify(t.stats), r.page === 'find' ? findLevel(t) + findTrend(t) : 0].join('|');
   });
   return [location.hash, store.textSize, store.units, ui.untilBack.size, tags.join('/')].join('#');
 }
@@ -1151,6 +1273,7 @@ function render() {
     if (r.sub === 'sound') html = viewSound(tag);
     else if (r.sub === 'quiet') html = viewQuiet(tag);
     else if (r.sub === 'lastseen') html = viewLastSeen(tag);
+    else if (r.sub === 'screen') html = viewScreen(tag);
     else { ui.draftKey = ''; html = viewTag(tag); }
   } else if (r.page === 'distance') { zone = 'settings'; html = viewDistance(tag); }
   else {
@@ -1194,6 +1317,12 @@ function render() {
 // ===========================================================================
 // Button actions
 // ===========================================================================
+function savingButton(el) {
+  if (!el) return;
+  el.disabled = true;
+  el.textContent = 'Saving…';
+}
+
 const actions = {
   async connect(el) {
     const tag = tagById(el.dataset.id);
@@ -1216,6 +1345,20 @@ const actions = {
   'open-pause'(el) { openModal({ type: 'pause', id: el.dataset.id || null }); },
   async 'resume-all'() { await pauseMany(store.tags, 0); },
   async resume(el) { await pauseMany([tagById(el.dataset.id)], 0); },
+  'sx-theme'(el) { ui.draft.extras.theme = Number(el.dataset.v); render(); },
+  'sx-bright'(el) { ui.draft.extras.brightness = Number(el.dataset.v); render(); },
+  'sx-secs'(el) { ui.draft.extras.screenSecs = Number(el.dataset.v); render(); },
+  'sx-step'(el) { ui.draft.extras.timerStep = Number(el.dataset.v); render(); },
+  async 'say-hi'(el) { if (await command(tagById(el.dataset.id), CMD.sayHi, 1)) toast('Look at the tag\'s screen!'); },
+  async 'save-screen'(el) {
+    savingButton(el);
+    const tag = tagById(route().id);
+    tag.extras = { ...ui.draft.extras };
+    tag.texts = { found: ui.draft.texts.found.trim() || DEFAULT_TEXTS.found, checklist: ui.draft.texts.checklist.map((v) => v.trim()) };
+    save();
+    await saveTagNow(tag, 'Saved to the tag!');
+    go('#/tag/' + enc(tag.id));
+  },
   async 'pause-all'(el) { await pauseMany(store.tags, Number(el.dataset.min)); },
   'phone-sound'(el) { store.phone.sound = el.dataset.v; save(); if (el.dataset.v !== 'off') playPattern(store.phone.tone, 4); render(); },
   'test-phone'() {
@@ -1320,14 +1463,17 @@ const actions = {
     else playPattern(t === 6 ? 0 : t, ui.draft?.volume || 3);
   },
   async 'preview-tag'() { await command(tagById(route().id), CMD.preview, ui.draft.tone, ui.draft.volume); },
-  async 'save-settings'() {
+  async 'save-settings'(el) {
+    savingButton(el);
     const tag = tagById(route().id);
     tag.settings = { ...ui.draft };
+    save();
     const fromSettings = route().page === 'distance';
     await saveTagNow(tag, 'Saved!');
     go(fromSettings ? '#/settings' : '#/tag/' + enc(tag.id));
   },
-  async 'save-quiet'() {
+  async 'save-quiet'(el) {
+    savingButton(el);
     const tag = tagById(route().id);
     tag.quiet = ui.draft.quiet.map((q) => ({ days: q.days, start: q.start, end: q.end }));
     tag.quietNames = [...ui.draft.names];
@@ -1395,12 +1541,20 @@ const actions = {
     tag.name = (ui.pendingName || 'My tag').trim() || 'My tag';
     tag.settings = p.fromTag.settings;
     tag.quiet = p.fromTag.quiet;
+    tag.model = p.conn.model || 1;
     store.tags.push(tag);
     save();
     attach(tag, p.conn);
     ui.pending = null;
     go('#/tag/' + enc(tag.id));
     openModal({ type: 'added', id: tag.id });
+    // A tag with a screen: get its screen settings, give it its name, read its streak
+    if (p.conn.hasScreen) {
+      p.conn.readExtras().then((x) => { tag.extras = x; })
+        .catch(() => {})
+        .then(() => pushTexts(tag)).catch(() => {})
+        .then(() => refreshStats(tag)).then(() => { save(); softRender(); });
+    }
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().then(render);
   },
 };
@@ -1437,6 +1591,13 @@ function onInput(el, final) {
       tag.settings = { ...tag.settings, motionOnly: el.checked };
       saveTagNow(tag, el.checked ? 'The tag only beeps while it\'s moving.' : 'The tag beeps even when it sits still.');
       return;
+    case 'sx-flag': {
+      const f = Number(el.dataset.f);
+      ui.draft.extras.flags = el.checked ? (ui.draft.extras.flags | f) : (ui.draft.extras.flags & ~f);
+      return;
+    }
+    case 'sx-item': ui.draft.texts.checklist[i] = el.value; return;
+    case 'sx-found': ui.draft.texts.found = el.value; return;
     case 'ph-popup': store.phone.popup = el.checked; save(); return;
     case 'ph-vibrate': store.phone.vibrate = el.checked; save(); if (el.checked) navigator.vibrate?.(200); return;
     case 'ph-tone': store.phone.tone = Number(el.value); save(); playPattern(store.phone.tone, 4); render(); return;
@@ -1450,7 +1611,12 @@ function onInput(el, final) {
       store.phone.saveLocation = el.checked; save();
       if (el.checked && 'geolocation' in navigator) navigator.geolocation.getCurrentPosition(() => {}, () => toast('Location is blocked, so spots can\'t be saved.'));
       return;
-    case 'rename': if (final) { tag.name = el.value.trim() || tag.name; save(); render(); } return;
+    case 'rename':
+      if (final) {
+        tag.name = el.value.trim() || tag.name; save(); render();
+        live.get(tag.id)?.hasScreen && live.get(tag.id).connected && live.get(tag.id).writeText(TEXT_KEY.name, tag.name).catch(() => {});
+      }
+      return;
     case 'pending-name': ui.pendingName = el.value; return;
   }
 }
@@ -1482,8 +1648,12 @@ function start() {
   setInterval(() => { if (!ui.modal) softRender(); }, 30000);
   // Never redraw under a finger or mid-scroll; catch up right after
   ui.touching = false; ui.lastScroll = 0;
+  // Finger or mouse down: hold every redraw until it's released, so a tap is never lost
+  addEventListener('pointerdown', () => { ui.touching = true; }, { passive: true, capture: true });
+  const touchEnd = () => { ui.touching = false; setTimeout(flushRender, 300); };
+  addEventListener('pointerup', touchEnd, { passive: true, capture: true });
+  addEventListener('pointercancel', touchEnd, { passive: true, capture: true });
   addEventListener('touchstart', () => { ui.touching = true; }, { passive: true });
-  const touchEnd = () => { ui.touching = false; setTimeout(flushRender, 950); };
   addEventListener('touchend', touchEnd, { passive: true });
   addEventListener('touchcancel', touchEnd, { passive: true });
   addEventListener('scroll', () => { ui.lastScroll = Date.now(); clearTimeout(ui.scrollT); ui.scrollT = setTimeout(flushRender, 950); }, { passive: true });
@@ -1516,6 +1686,7 @@ function start() {
     softRender();
   });
   setInterval(watchdog, 2000);
+  setInterval(() => { for (const t of store.tags) if (isConnected(t.id) && t.model >= 2) refreshStats(t).then(softRender); }, 30000);
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
   render();

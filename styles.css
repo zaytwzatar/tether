@@ -429,3 +429,29 @@ body[data-zone="settings"] { --zone: var(--pause); --zone-soft: var(--pause-soft
 .tabbar a { min-width: 0; white-space: nowrap; font-size: min(.9rem, 16px); }
 .tabbar .tab-ic { max-width: 100%; }
 .tag-main .grow { overflow-wrap: anywhere; }
+
+/* ---------- StickS3: screen & extras ---------- */
+textarea {
+  min-height: 5.5rem; border-radius: 1rem; border: 2px solid var(--field); background: var(--surface);
+  padding: .7rem .9rem; font-size: 1.05rem; font-weight: 700; width: 100%; resize: vertical; font-family: inherit;
+}
+.swatches { display: flex; gap: .7rem; flex-wrap: wrap; }
+.swatch {
+  width: 3.2rem; height: 3.2rem; border-radius: 50%; border: 3px solid #fff; background: var(--sw);
+  box-shadow: 0 0 0 2px var(--line); cursor: pointer; transition: transform .12s;
+}
+.swatch.on { box-shadow: 0 0 0 3px var(--ink); transform: scale(1.08); }
+.swatch:active { transform: scale(.94); }
+.check-items { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+.check-items input { min-width: 0; }
+@media (max-width: 380px) { .check-items { grid-template-columns: 1fr; } }
+.streak-card { display: flex; align-items: center; gap: 1rem; background: linear-gradient(135deg, #FFF0C2, #FFE6D5); border-color: #F6DDB0; }
+.streak-card b { display: block; font-family: var(--display); font-size: 1.25rem; font-weight: 600; line-height: 1.2; }
+.streak-card small { display: block; color: var(--ink-2); font-size: .95rem; margin-top: .2rem; }
+.streak-card .flame { width: 3.4rem; height: 3.4rem; border-radius: 50%; background: #fff; color: #E8590C; display: grid; place-items: center; flex-shrink: 0; animation: flicker 2.4s ease-in-out infinite; }
+@keyframes flicker { 0%, 100% { transform: scale(1) rotate(0); } 50% { transform: scale(1.06) rotate(-4deg); } }
+.hero-batt { display: inline-flex; align-items: center; gap: .4rem; font-size: .95rem; color: var(--ink-2); }
+
+/* Messages appear at the top so they never cover Save or other buttons */
+#toast { top: calc(.8rem + env(safe-area-inset-top)); bottom: auto !important; animation: drop .25s ease-out; }
+@keyframes drop { from { transform: translate(-50%, -1rem); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }

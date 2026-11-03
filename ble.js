@@ -9,7 +9,41 @@ export const UUIDS = {
   status: uuid('04'),
   audio: uuid('05'),
   quiet: uuid('06'),
+  info: uuid('07'),      // StickS3 and newer: what the tag can do
+  extras: uuid('08'),    // screen and extra-feature settings
+  text: uuid('09'),      // name, "if found" message, checklist
+  stats: uuid('0a'),     // streaks, saves, battery
 };
+
+export const MODELS = { 1: 'Circuit Playground', 2: 'M5StickS3' };
+export const THEMES = [
+  { id: 0, name: 'Orange', color: '#F06A1E' },
+  { id: 1, name: 'Blue', color: '#2F7DE1' },
+  { id: 2, name: 'Green', color: '#1FA672' },
+  { id: 3, name: 'Purple', color: '#7C5CE0' },
+  { id: 4, name: 'Pink', color: '#E0457B' },
+];
+export const XF = { face: 1, checklist: 2, camera: 4, callerId: 8, clock24: 16, pickupWake: 32 };
+export const DEFAULT_EXTRAS = { brightness: 3, screenSecs: 10, theme: 0, flags: 1 | 2 | 4 | 8 | 32, timerStep: 15 };
+export const DEFAULT_TEXTS = { found: 'If found, please call the owner', checklist: ['Phone', 'Wallet', 'Keys', 'Water bottle'] };
+export const TEXT_KEY = { name: 1, found: 2, check0: 3 };
+
+export function encodeExtras(x) {
+  const b = new Uint8Array(16);
+  b[0] = 1; b[1] = x.brightness; b[2] = x.screenSecs; b[3] = x.theme; b[4] = x.flags; b[5] = x.timerStep;
+  return b;
+}
+export function decodeExtras(dv) {
+  return { brightness: dv.getUint8(1), screenSecs: dv.getUint8(2), theme: dv.getUint8(3), flags: dv.getUint8(4), timerStep: dv.getUint8(5) || 15 };
+}
+export function decodeStats(dv) {
+  const streak = dv.getUint16(0, true);
+  return {
+    streak: streak === 0xffff ? null : streak, saves: dv.getUint16(2, true), best: dv.getUint16(4, true),
+    battery: dv.getUint8(6) === 0xff ? null : dv.getUint8(6), charging: dv.getUint8(7) === 1,
+    hasNote: dv.byteLength > 8 && dv.getUint8(8) === 1, callerIdOn: dv.byteLength > 9 && dv.getUint8(9) === 1,
+  };
+}
 
 export const TONES = [
   { id: 0, name: 'Chime', note: 'Soft, three notes' },
@@ -95,13 +129,13 @@ export function decodeStatus(dv) {
   };
 }
 
-export const CMD = { ring: 1, stop: 2, dnd: 3, flash: 4, calibrate: 5, time: 6, preview: 7, reset: 8 };
+export const CMD = { ring: 1, stop: 2, dnd: 3, flash: 4, calibrate: 5, time: 6, preview: 7, reset: 8, clock: 9, sayHi: 10 };
 
 export function bluetoothSupport() {
   if (!('bluetooth' in navigator)) {
     const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
     return { ok: false, reason: ios
-      ? 'iPhone and iPad browsers can\'t use Bluetooth. The iPhone version will be a separate app.'
+      ? 'Safari can\'t use Bluetooth. On iPhone, open this page in the free Bluefy browser instead.'
       : 'This browser can\'t use Bluetooth. Open the app in Chrome or Edge.' };
   }
   if (!window.isSecureContext) return { ok: false, reason: 'Bluetooth only works over https:// (or localhost).' };
@@ -165,6 +199,14 @@ export class TagConnection extends EventTarget {
       for (const k of ['settings', 'command', 'status', 'audio', 'quiet']) {
         this.chars[k] = await withTimeout(svc.getCharacteristic(UUIDS[k]), 5000, 'characteristic');
       }
+      // Newer tags (StickS3) have a screen and extras; older ones simply don't have these
+      this.model = 1;
+      for (const k of ['info', 'extras', 'text', 'stats']) {
+        try { this.chars[k] = await withTimeout(svc.getCharacteristic(UUIDS[k]), 3000, k); } catch { this.chars[k] = null; }
+      }
+      if (this.chars.info) {
+        try { this.model = (await withTimeout(this.chars.info.readValue(), 3000, 'info')).getUint8(0) || 1; } catch { /* keep 1 */ }
+      }
       this.chars.status.removeEventListener('characteristicvaluechanged', this.onStatus);
       this.chars.status.addEventListener('characteristicvaluechanged', this.onStatus);
       await withTimeout(this.chars.status.startNotifications(), 5000, 'notifications');
@@ -222,7 +264,22 @@ export class TagConnection extends EventTarget {
   async sendTime() {
     const now = new Date();
     const sec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
-    return this.command(CMD.time, now.getDay(), sec & 0xff, (sec >> 8) & 0xff, (sec >> 16) & 0xff, (sec >> 24) & 0xff);
+    await this.command(CMD.time, now.getDay(), sec & 0xff, (sec >> 8) & 0xff, (sec >> 16) & 0xff, (sec >> 24) & 0xff);
+    if (this.model >= 2) {   // full date and time for the clock and streaks
+      const epoch = Math.floor(now.getTime() / 1000);
+      const tz = (-now.getTimezoneOffset()) & 0xffff;
+      await this.command(CMD.clock, epoch & 0xff, (epoch >> 8) & 0xff, (epoch >> 16) & 0xff, (epoch >>> 24) & 0xff, tz & 0xff, tz >> 8);
+    }
+  }
+
+  get hasScreen() { return this.model >= 2 && !!this.chars.extras; }
+  async readExtras() { return this.run(async () => decodeExtras(await this.chars.extras.readValue())); }
+  async writeExtras(x) { return this.run(() => this.chars.extras.writeValueWithResponse(encodeExtras(x))); }
+  async readStats() { return this.run(async () => decodeStats(await this.chars.stats.readValue())); }
+  async writeText(key, text) {
+    const bytes = new TextEncoder().encode(String(text).slice(0, 80));
+    const pkt = new Uint8Array(bytes.length + 1); pkt[0] = key; pkt.set(bytes, 1);
+    return this.run(() => this.chars.text.writeValueWithResponse(pkt));
   }
 
   // pcm: Uint8Array of 8-bit samples at `rate` samples per second
@@ -261,7 +318,14 @@ export class DemoTag extends EventTarget {
     this.quiet = DEFAULT_QUIET.map((q) => ({ ...q }));
     this.rssi = -60; this.counter = 0; this.calibrating = false; this.alerting = false;
     this.dndUntil = 0; this.hasRecording = false; this.event = 0;
+    this.model = 2; this.extras = { ...DEFAULT_EXTRAS }; this.texts = {};
+    this.stats = { streak: 4, saves: 2, best: 9, battery: 82, charging: false, hasNote: false, callerIdOn: false };
   }
+  get hasScreen() { return true; }
+  async readExtras() { return { ...this.extras }; }
+  async writeExtras(x) { await wait(120); this.extras = { ...x }; }
+  async readStats() { return { ...this.stats }; }
+  async writeText(key, text) { await wait(60); this.texts[key] = text; }
   async connect() {
     await new Promise((r) => setTimeout(r, 600));
     this.connected = true;
