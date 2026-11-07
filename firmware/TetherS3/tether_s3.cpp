@@ -227,7 +227,8 @@ int streakDays() {
 // Sound: short melodies played a note at a time so the screen keeps moving
 // ===========================================================================
 struct Note { uint16_t f; uint16_t ms; };
-std::vector<Note> patterns[6];
+const uint8_t TONE_COUNT = 17;   // 0-5 built in, 6 = recording, 7-16 extra sounds
+std::vector<Note> patterns[TONE_COUNT];
 std::vector<Note>* playing = nullptr; size_t playIdx = 0; uint32_t noteEnd = 0;
 
 void buildPatterns() {
@@ -240,6 +241,18 @@ void buildPatterns() {
     for (int f = 900; f <= 1800; f += 60) patterns[TONE_SIREN].push_back({ (uint16_t)f, 16 });
     for (int f = 1800; f >= 900; f -= 60) patterns[TONE_SIREN].push_back({ (uint16_t)f, 16 });
   }
+  // 7 doorbell, 8 bird song, 9 coin, 10 power up, 11 alarm clock,
+  // 12 sonar, 13 cuckoo, 14 laser, 15 twinkle, 16 fanfare
+  patterns[7] = { {1319, 300}, {1047, 500} };
+  patterns[8] = { {2637, 50}, {0, 30}, {3136, 50}, {0, 30}, {3520, 80}, {0, 140}, {2637, 50}, {0, 30}, {3136, 50}, {0, 30}, {3520, 80} };
+  patterns[9] = { {988, 80}, {1319, 320} };
+  patterns[10] = { {523, 60}, {659, 60}, {784, 60}, {1047, 60}, {1319, 60}, {1568, 60}, {2093, 160} };
+  patterns[11] = { {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {0, 250}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {0, 250} };
+  patterns[12] = { {1568, 60}, {0, 40}, {1568, 450} };
+  patterns[13] = { {784, 250}, {0, 60}, {659, 400}, {0, 250}, {784, 250}, {0, 60}, {659, 400} };
+  patterns[14] = { {2000, 10}, {1900, 10}, {1800, 10}, {1700, 10}, {1600, 10}, {1500, 10}, {1400, 10}, {1300, 10}, {1200, 10}, {1100, 10}, {1000, 10}, {900, 10}, {800, 10}, {700, 10}, {600, 10}, {0, 70}, {2000, 10}, {1900, 10}, {1800, 10}, {1700, 10}, {1600, 10}, {1500, 10}, {1400, 10}, {1300, 10}, {1200, 10}, {1100, 10}, {1000, 10}, {900, 10}, {800, 10}, {700, 10}, {600, 10}, {0, 70}, {2000, 10}, {1900, 10}, {1800, 10}, {1700, 10}, {1600, 10}, {1500, 10}, {1400, 10}, {1300, 10}, {1200, 10}, {1100, 10}, {1000, 10}, {900, 10}, {800, 10}, {700, 10}, {600, 10}, {0, 70} };
+  patterns[15] = { {523, 180}, {0, 40}, {523, 180}, {0, 40}, {784, 180}, {0, 40}, {784, 180}, {0, 40}, {880, 180}, {0, 40}, {880, 180}, {0, 40}, {784, 360} };
+  patterns[16] = { {784, 100}, {0, 30}, {784, 100}, {0, 30}, {784, 100}, {0, 30}, {1047, 450} };
 }
 uint8_t volumeFor(uint8_t v) { const uint8_t m[6] = { 0, 50, 90, 140, 200, 255 }; return m[constrain(v, 1, 5)]; }
 
@@ -256,7 +269,7 @@ void playTone(uint8_t tone, uint8_t vol) {
     if (clipBuf && clipLen) { M5.Speaker.playRaw(clipBuf, clipLen, clipRate, false, 1, 0, true); playing = nullptr; return; }
     tone = TONE_CHIME;
   }
-  if (tone > TONE_SIREN) tone = TONE_CHIME;
+  if (tone >= TONE_COUNT || patterns[tone].empty()) tone = TONE_CHIME;
   playing = &patterns[tone]; playIdx = 0; noteEnd = 0;
 }
 void stopSound() { playing = nullptr; if (speakerOn) M5.Speaker.stop(); }

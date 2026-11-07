@@ -875,7 +875,7 @@ function toggle(bind, on, title, sub, extra = '') {
 }
 
 // ----- My Phone: everything THIS PHONE does -----
-const PHONE_SOUNDS = [0, 1, 4, 5];
+const PHONE_SOUNDS = [0, 1, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 function viewPhone() {
   const ph = store.phone;
   const notif = 'Notification' in window ? Notification.permission : 'unsupported';
@@ -978,7 +978,7 @@ function viewSound(tag) {
   const d = draftFor(tag, 'sound');
   const st = status.get(tag.id);
   const hasRec = st?.hasRecording || ui.clip;
-  const cards = TONES.filter((t) => t.id !== 6 || hasRec).map((t) => `
+  const cards = [...TONES.filter((t) => t.id !== 6), ...(hasRec ? [TONES[6]] : [])].map((t) => `
     <label class="sound-card ${d.tone === t.id ? 'on' : ''}">
       <input type="radio" name="tone" value="${t.id}" data-bind="tone" ${d.tone === t.id ? 'checked' : ''}>
       <b>${t.name}</b><small>${t.id === 6 ? 'Your own voice' : esc(t.note)}</small>

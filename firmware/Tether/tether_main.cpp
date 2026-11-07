@@ -184,6 +184,21 @@ void sweep(uint16_t from, uint16_t to, uint16_t stepMs, uint8_t amp) {
 
 bool playClip(uint8_t vol);
 
+// Extra sounds 7-16 (same notes as the app and the StickS3)
+static const uint16_t TUNE_7[][2] = { {1319, 300}, {1047, 500} };
+static const uint16_t TUNE_8[][2] = { {2637, 50}, {0, 30}, {3136, 50}, {0, 30}, {3520, 80}, {0, 140}, {2637, 50}, {0, 30}, {3136, 50}, {0, 30}, {3520, 80} };
+static const uint16_t TUNE_9[][2] = { {988, 80}, {1319, 320} };
+static const uint16_t TUNE_10[][2] = { {523, 60}, {659, 60}, {784, 60}, {1047, 60}, {1319, 60}, {1568, 60}, {2093, 160} };
+static const uint16_t TUNE_11[][2] = { {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {0, 250}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {2093, 70}, {0, 50}, {0, 250} };
+static const uint16_t TUNE_12[][2] = { {1568, 60}, {0, 40}, {1568, 450} };
+static const uint16_t TUNE_13[][2] = { {784, 250}, {0, 60}, {659, 400}, {0, 250}, {784, 250}, {0, 60}, {659, 400} };
+static const uint16_t TUNE_14[][2] = { {2000, 10}, {1900, 10}, {1800, 10}, {1700, 10}, {1600, 10}, {1500, 10}, {1400, 10}, {1300, 10}, {1200, 10}, {1100, 10}, {1000, 10}, {900, 10}, {800, 10}, {700, 10}, {600, 10}, {0, 70}, {2000, 10}, {1900, 10}, {1800, 10}, {1700, 10}, {1600, 10}, {1500, 10}, {1400, 10}, {1300, 10}, {1200, 10}, {1100, 10}, {1000, 10}, {900, 10}, {800, 10}, {700, 10}, {600, 10}, {0, 70}, {2000, 10}, {1900, 10}, {1800, 10}, {1700, 10}, {1600, 10}, {1500, 10}, {1400, 10}, {1300, 10}, {1200, 10}, {1100, 10}, {1000, 10}, {900, 10}, {800, 10}, {700, 10}, {600, 10}, {0, 70} };
+static const uint16_t TUNE_15[][2] = { {523, 180}, {0, 40}, {523, 180}, {0, 40}, {784, 180}, {0, 40}, {784, 180}, {0, 40}, {880, 180}, {0, 40}, {880, 180}, {0, 40}, {784, 360} };
+static const uint16_t TUNE_16[][2] = { {784, 100}, {0, 30}, {784, 100}, {0, 30}, {784, 100}, {0, 30}, {1047, 450} };
+#define TUNE(n) { TUNE_##n, sizeof(TUNE_##n) / sizeof(TUNE_##n[0]) }
+struct Tune { const uint16_t (*n)[2]; size_t len; };
+const Tune EXTRA_TUNES[] = { TUNE(7), TUNE(8), TUNE(9), TUNE(10), TUNE(11), TUNE(12), TUNE(13), TUNE(14), TUNE(15), TUNE(16) };
+
 void playTone(uint8_t tone, uint8_t vol) {
   uint8_t a = amplitudeFor(vol);
   speakerOn();
@@ -196,6 +211,12 @@ void playTone(uint8_t tone, uint8_t vol) {
     case TONE_SIREN:   for (int i = 0; i < 3; i++) { sweep(900, 1800, 8, a); sweep(1800, 900, 8, a); } break;
     case TONE_RECORDING:
       if (!playClip(vol)) { note(1319, 150, a); note(1047, 150, a); note(784, 320, a); }
+      break;
+    default:
+      if (tone >= 7 && tone <= 16) {
+        const Tune& tu = EXTRA_TUNES[tone - 7];
+        for (size_t i = 0; i < tu.len; i++) note(tu.n[i][0], tu.n[i][1], a);
+      } else { note(1319, 150, a); note(1047, 150, a); note(784, 320, a); }
       break;
   }
   speakerOff();

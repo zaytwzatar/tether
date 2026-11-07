@@ -53,7 +53,18 @@ export const TONES = [
   { id: 4, name: 'Melody', note: 'Short tune' },
   { id: 5, name: 'Siren', note: 'Loudest, for noisy places' },
   { id: 6, name: 'My recording', note: 'Your own sound, up to 5 seconds' },
+  { id: 7, name: 'Doorbell', note: 'Ding-dong' },
+  { id: 8, name: 'Bird song', note: 'Quick happy chirps' },
+  { id: 9, name: 'Coin', note: 'Like a video game coin' },
+  { id: 10, name: 'Power up', note: 'Fast climbing notes' },
+  { id: 11, name: 'Alarm clock', note: 'Beep-beep-beep-beep' },
+  { id: 12, name: 'Sonar', note: 'Submarine ping' },
+  { id: 13, name: 'Cuckoo', note: 'Like a cuckoo clock' },
+  { id: 14, name: 'Laser', note: 'Pew pew pew' },
+  { id: 15, name: 'Twinkle', note: 'Twinkle, twinkle little star' },
+  { id: 16, name: 'Fanfare', note: 'Ta-ta-ta-taaa!' },
 ];
+// TONES[id] works because ids match their place in the list.
 
 export const STYLES = [
   { id: 0, name: 'Sound', note: 'Beeps out loud' },
