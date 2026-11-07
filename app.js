@@ -232,7 +232,7 @@ function onStatus(id, st) {
   lastEventCount.set(id, st.eventCounter);
   if (prevCount !== undefined && prevCount !== st.eventCounter) {
     if (st.event === 1) {
-      startAlarm(store.phone.tone);
+      startAlarm(store.phone.tone, { say: 'Here I am! Over here!' });
       notify('Here is your phone!', tag.name + ' is calling your phone.');
       openModal({ type: 'phone', id });
     }
@@ -293,12 +293,14 @@ function raiseAlert(tag) {
   const ph = store.phone;
   if (ph.notify) notify(tag.name + ' is out of range!', 'Did you leave something behind?');
   if (ph.vibrate && navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
-  if (ph.sound === 'loud') startAlarm(ph.tone);
-  else if (ph.sound === 'short') playPattern(ph.tone, 4);
+  if (ph.sound === 'loud') startAlarm(ph.tone, { say: leftSay(tag) });
+  else if (ph.sound === 'short') playPattern(ph.tone, 4, leftSay(tag));
   if (ph.popup) openModal({ type: 'alert', id: tag.id });
   else toast(tag.name + ' is out of range!');
 }
 const phoneTone = () => store.phone.tone;
+// What the phone says with the "Talking" sound
+const leftSay = (tag) => `Hey! You left your ${tag?.name || 'keys'} behind!`;
 
 // While the app is open, keep looking for the tag and reconnect by itself
 // as soon as it's back in range.
@@ -824,6 +826,8 @@ function viewScreen(tag) {
       <b>Color</b>
       <div class="swatches" role="group" aria-label="Color theme">${THEMES.map((t) => `<button type="button" class="swatch ${x.theme === t.id ? 'on' : ''}" style="--sw:${t.color}" aria-label="${t.name}" aria-pressed="${x.theme === t.id}" data-action="sx-theme" data-v="${t.id}"></button>`).join('')}</div>
       ${toggle('sx-flag', flag(XF.face), 'Show the little face', 'Happy when your phone is near, worried when it\'s not', `data-f="${XF.face}"`)}
+      ${flag(XF.face) ? toggle('sx-flag-off', !flag(XF.calmFace), 'Funny faces', 'Winks, sticks out its tongue, gets dizzy when you shake it. Press the front button on the home screen for a new face.', `data-f="${XF.calmFace}"`) : ''}
+      ${flag(XF.face) && isConnected(tag.id) ? `<button type="button" class="btn soft wide" data-action="make-face" data-id="${esc(tag.id)}">${icon('sparkle', 20)}Make a funny face now</button>` : ''}
       <b>Brightness</b>
       <div class="vol-row" role="group" aria-label="Brightness">${[1, 2, 3, 4, 5].map((v) => `<button type="button" class="vol-dot ${x.brightness >= v ? 'on' : ''}" style="height:${1.8 + v * 0.55}rem" aria-label="Brightness ${v} of 5" aria-pressed="${x.brightness === v}" data-action="sx-bright" data-v="${v}">${v === x.brightness ? v : ''}</button>`).join('')}</div>
       <b>Screen stays on for</b>
@@ -854,6 +858,13 @@ function viewScreen(tag) {
     </section>
 
     <section class="card pad stack">
+      <h2 class="h2">Vibration</h2>
+      <p class="muted">The StickS3 has no motor inside. Plug the small M5Stack “Unit Vibrator” into its side port to make it buzz.</p>
+      ${toggle('sx-flag', flag(XF.vibe), 'I plugged in the vibration add-on', 'Buzzes for alerts, calls and texts', `data-f="${XF.vibe}"`)}
+      ${isConnected(tag.id) ? `<button type="button" class="btn soft wide" data-action="test-vibe" data-id="${esc(tag.id)}">${icon('sparkle', 20)}Test the buzz</button>` : ''}
+    </section>
+
+    <section class="card pad stack">
       <h2 class="h2">Parking timer</h2>
       <b>Each press adds</b>
       <div class="seg-row" style="--n:4">${[5, 10, 15, 30].map((v) => seg('sx-step', v, x.timerStep, v + ' min')).join('')}</div>
@@ -875,7 +886,7 @@ function toggle(bind, on, title, sub, extra = '') {
 }
 
 // ----- My Phone: everything THIS PHONE does -----
-const PHONE_SOUNDS = [0, 1, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const PHONE_SOUNDS = [27, 0, 1, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 function viewPhone() {
   const ph = store.phone;
   const notif = 'Notification' in window ? Notification.permission : 'unsupported';
@@ -978,12 +989,14 @@ function viewSound(tag) {
   const d = draftFor(tag, 'sound');
   const st = status.get(tag.id);
   const hasRec = st?.hasRecording || ui.clip;
-  const cards = [...TONES.filter((t) => t.id !== 6), ...(hasRec ? [TONES[6]] : [])].map((t) => `
+  const card = (t) => `
     <label class="sound-card ${d.tone === t.id ? 'on' : ''}">
       <input type="radio" name="tone" value="${t.id}" data-bind="tone" ${d.tone === t.id ? 'checked' : ''}>
-      <b>${t.name}</b><small>${t.id === 6 ? 'Your own voice' : esc(t.note)}</small>
-      <button type="button" class="play" aria-label="Listen to ${t.name}" data-action="listen" data-tone="${t.id}">${icon('play', 18)}</button>
-    </label>`).join('');
+      <b>${esc(t.name)}</b><small>${t.id === 6 ? 'Your own voice' : esc(t.note)}</small>
+      <button type="button" class="play" aria-label="Listen to ${esc(t.name)}" data-action="listen" data-tone="${t.id}">${icon('play', 18)}</button>
+    </label>`;
+  const cards = [...TONES.filter((t) => t.id !== 6 && !t.voice), ...(hasRec ? [TONES[6]] : [])].map(card).join('');
+  const talking = (tag.model || 1) >= 2 ? TONES.filter((t) => t.voice && !t.phoneOnly).map(card).join('') : '';
   const reps = [[1, 'Once'], [3, '3 times'], [5, '5 times'], [0, 'Until it\'s back']];
   return `
     ${back('#/tag/' + enc(tag.id), tag.name)}
@@ -992,6 +1005,9 @@ function viewSound(tag) {
     <header><h1>Which sound?</h1><p class="lead">Tap a sound to pick it. Tap ${icon('play', 14)} to listen.</p></header>
     ${notConnectedNote(tag)}
     <div class="sound-grid" role="radiogroup" aria-label="Sound">${cards}</div>
+    ${talking ? `<h2 class="h2" style="margin-top:1.4rem">Talking alerts</h2>
+    <p class="muted">The tag says it out loud.</p>
+    <div class="sound-grid" role="radiogroup" aria-label="Talking alert">${talking}</div>` : ''}
 
     <section class="card pad stack">
       <h2 class="h2">Record your own</h2>
@@ -1349,6 +1365,8 @@ const actions = {
   'sx-bright'(el) { ui.draft.extras.brightness = Number(el.dataset.v); render(); },
   'sx-secs'(el) { ui.draft.extras.screenSecs = Number(el.dataset.v); render(); },
   'sx-step'(el) { ui.draft.extras.timerStep = Number(el.dataset.v); render(); },
+  async 'make-face'(el) { if (await command(tagById(el.dataset.id), CMD.face, 255)) toast('Look at the tag!'); },
+  async 'test-vibe'(el) { if (await command(tagById(el.dataset.id), CMD.vibeTest)) toast('The tag should buzz twice.'); },
   async 'say-hi'(el) { if (await command(tagById(el.dataset.id), CMD.sayHi, 1)) toast('Look at the tag\'s screen!'); },
   async 'save-screen'(el) {
     savingButton(el);
@@ -1360,13 +1378,13 @@ const actions = {
     go('#/tag/' + enc(tag.id));
   },
   async 'pause-all'(el) { await pauseMany(store.tags, Number(el.dataset.min)); },
-  'phone-sound'(el) { store.phone.sound = el.dataset.v; save(); if (el.dataset.v !== 'off') playPattern(store.phone.tone, 4); render(); },
+  'phone-sound'(el) { store.phone.sound = el.dataset.v; save(); if (el.dataset.v !== 'off') playPattern(store.phone.tone, 4, leftSay(store.tags[0])); render(); },
   'test-phone'() {
     const ph = store.phone;
     if (ph.vibrate) navigator.vibrate?.([300, 120, 300]);
     if (ph.notify) notify('This is a test', 'This is how Tether alerts you.');
-    if (ph.sound === 'loud') startAlarm(ph.tone, { limitMs: 6000 });
-    else if (ph.sound === 'short') playPattern(ph.tone, 4);
+    if (ph.sound === 'loud') startAlarm(ph.tone, { limitMs: 6000, say: leftSay(store.tags[0]) });
+    else if (ph.sound === 'short') playPattern(ph.tone, 4, leftSay(store.tags[0]));
     if (ph.popup) toast('This is how your phone will alert you.', 'Stop', stopAlarm);
     else toast('Test sent. The big on-screen alert is turned off.');
   },
@@ -1383,7 +1401,7 @@ const actions = {
   'm-until-back'() {
     const tag = tagById(ui.modal.id);
     ui.untilBack.add(tag.id);
-    startAlarm(phoneTone(), { gapMs: 4000, limitMs: 60 * 60000 });
+    startAlarm(phoneTone(), { gapMs: 4000, limitMs: 60 * 60000, say: leftSay(tag) });
     closeModal();
     render();
     toast('Your phone will keep alerting until ' + tag.name + ' is back.');
@@ -1460,7 +1478,7 @@ const actions = {
   listen(el) {
     const t = Number(el.dataset.tone);
     if (t === 6 && ui.clip) playPcm(ui.clip.pcm, ui.clip.rate);
-    else playPattern(t === 6 ? 0 : t, ui.draft?.volume || 3);
+    else playPattern(t === 6 ? 0 : t, ui.draft?.volume || 3, leftSay(store.tags[0]));
   },
   async 'preview-tag'() { await command(tagById(route().id), CMD.preview, ui.draft.tone, ui.draft.volume); },
   async 'save-settings'(el) {
@@ -1591,16 +1609,18 @@ function onInput(el, final) {
       tag.settings = { ...tag.settings, motionOnly: el.checked };
       saveTagNow(tag, el.checked ? 'The tag only beeps while it\'s moving.' : 'The tag beeps even when it sits still.');
       return;
-    case 'sx-flag': {
+    case 'sx-flag': case 'sx-flag-off': {
       const f = Number(el.dataset.f);
-      ui.draft.extras.flags = el.checked ? (ui.draft.extras.flags | f) : (ui.draft.extras.flags & ~f);
+      const set = b === 'sx-flag' ? el.checked : !el.checked;
+      ui.draft.extras.flags = set ? (ui.draft.extras.flags | f) : (ui.draft.extras.flags & ~f);
+      if (f === XF.face) render();   // show or hide the "funny faces" switch
       return;
     }
     case 'sx-item': ui.draft.texts.checklist[i] = el.value; return;
     case 'sx-found': ui.draft.texts.found = el.value; return;
     case 'ph-popup': store.phone.popup = el.checked; save(); return;
     case 'ph-vibrate': store.phone.vibrate = el.checked; save(); if (el.checked) navigator.vibrate?.(200); return;
-    case 'ph-tone': store.phone.tone = Number(el.value); save(); playPattern(store.phone.tone, 4); render(); return;
+    case 'ph-tone': store.phone.tone = Number(el.value); save(); playPattern(store.phone.tone, 4, leftSay(store.tags[0])); render(); return;
     case 'ph-notify':
       if (el.checked && 'Notification' in window && Notification.permission !== 'granted') {
         Notification.requestPermission().then((p) => { store.phone.notify = p === 'granted'; save(); render(); });

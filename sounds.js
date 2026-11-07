@@ -31,7 +31,42 @@ const PATTERNS = {
   16: [[784,100],[0,30],[784,100],[0,30],[784,100],[0,30],[1047,450]],
 };
 
-export function playPattern(tone, volume = 3) {
+// Talking alerts 17-26: short recorded clips (voices/v17.mp3 ...)
+const VOICE_LEN = { 17: 1.6, 18: 1.6, 19: 2.3, 20: 1.6, 21: 1.2, 22: 2.8, 23: 2.9, 24: 2.6, 25: 2.0, 26: 1.6 };
+const voiceBufs = new Map();
+export function preloadVoices() {
+  for (const id of Object.keys(VOICE_LEN)) loadVoice(Number(id)).catch(() => {});
+}
+function loadVoice(id) {
+  if (!voiceBufs.has(id)) {
+    voiceBufs.set(id, fetch(`voices/v${id}.mp3`).then((r) => r.arrayBuffer())
+      .then((b) => new Promise((ok, bad) => audio().decodeAudioData(b, ok, bad)))
+      .catch((e) => { voiceBufs.delete(id); throw e; }));
+  }
+  return voiceBufs.get(id);
+}
+function playVoice(id, volume) {
+  const a = audio();
+  const gain = a.createGain();
+  gain.gain.value = 0.35 + (volume / 5) * 0.65;
+  gain.connect(a.destination);
+  loadVoice(id).then((buf) => { const s = a.createBufferSource(); s.buffer = buf; s.connect(gain); s.start(); }).catch(() => playPattern(0, volume));
+  return VOICE_LEN[id] * 1000;
+}
+
+// Tone 27: this phone speaks (uses the tag's name)
+export function speak(text, volume = 4) {
+  if (!('speechSynthesis' in window)) return playPattern(0, volume);
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.volume = Math.min(1, 0.4 + volume * 0.12); u.rate = 1.05;
+  speechSynthesis.speak(u);
+  return 700 + text.length * 75;
+}
+
+export function playPattern(tone, volume = 3, say = 'Hey! Don\'t forget your things!') {
+  if (VOICE_LEN[tone]) return playVoice(tone, volume);
+  if (tone === 27) return speak(say, volume);
   const a = audio();
   const gainValue = 0.04 + (volume / 5) * 0.16;
   let t = a.currentTime + 0.02;
@@ -55,10 +90,11 @@ export function playPattern(tone, volume = 3) {
 let alarmTimer = null;
 let alarmLimit = null;
 // gapMs: pause between rounds. limitMs: stop by itself after this long.
-export function startAlarm(tone = 5, { gapMs = 500, limitMs = 60000 } = {}) {
+export function startAlarm(tone = 5, { gapMs = 500, limitMs = 60000, say } = {}) {
   stopAlarm();
+  if (VOICE_LEN[tone] || tone === 27) gapMs = Math.max(gapMs, 1200);   // a breath between sentences
   const loop = () => {
-    const ms = playPattern(tone, 5);
+    const ms = playPattern(tone, 5, say);
     if (navigator.vibrate) navigator.vibrate([400, 200, 400]);
     alarmTimer = setTimeout(loop, ms + gapMs);
   };
@@ -69,6 +105,7 @@ export function stopAlarm() {
   clearTimeout(alarmTimer);
   clearTimeout(alarmLimit);
   alarmTimer = null;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
   if (navigator.vibrate) navigator.vibrate(0);
 }
 export const alarmRunning = () => alarmTimer !== null;

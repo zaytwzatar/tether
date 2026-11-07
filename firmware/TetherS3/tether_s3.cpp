@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include <esp_mac.h>
 #include <vector>
+#include "tether_voices.h"
 
 // ===========================================================================
 // Bluetooth IDs. Must match the app (app/ble.js).
@@ -31,7 +32,7 @@ static const char* ANCS_CONTROL = "69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9";
 static const char* ANCS_DATA    = "22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB";
 
 static const uint8_t MODEL_STICKS3 = 2;
-static const uint8_t FW_VERSION = 1;
+static const uint8_t FW_VERSION = 2;   // 2: talking alerts, funny faces, vibration add-on
 
 // ===========================================================================
 // Settings (same layout as the Circuit Playground version)
@@ -50,7 +51,9 @@ struct __attribute__((packed)) QuietSlot { uint8_t days; uint16_t startMin; uint
 struct __attribute__((packed)) QuietTimes { QuietSlot slot[2]; };
 
 // Screen and extras. bit flags:
-enum ExtraFlag : uint8_t { X_FACE = 1, X_CHECKLIST = 2, X_CAMERA = 4, X_CALLER_ID = 8, X_CLOCK24 = 16, X_PICKUP_WAKE = 32 };
+enum ExtraFlag : uint8_t { X_FACE = 1, X_CHECKLIST = 2, X_CAMERA = 4, X_CALLER_ID = 8, X_CLOCK24 = 16, X_PICKUP_WAKE = 32,
+                           X_CALM_FACE = 64,   // no funny faces
+                           X_VIBE = 128 };     // vibration motor plugged into the side port
 struct __attribute__((packed)) Extras {
   uint8_t version;      // 1
   uint8_t brightness;   // 1..5
@@ -254,7 +257,8 @@ void buildPatterns() {
   patterns[15] = { {523, 180}, {0, 40}, {523, 180}, {0, 40}, {784, 180}, {0, 40}, {784, 180}, {0, 40}, {880, 180}, {0, 40}, {880, 180}, {0, 40}, {784, 360} };
   patterns[16] = { {784, 100}, {0, 30}, {784, 100}, {0, 30}, {784, 100}, {0, 30}, {1047, 450} };
 }
-uint8_t volumeFor(uint8_t v) { const uint8_t m[6] = { 0, 50, 90, 140, 200, 255 }; return m[constrain(v, 1, 5)]; }
+// Top volume stays under 75%: M5Stack says louder can make the StickS3 restart on battery
+uint8_t volumeFor(uint8_t v) { const uint8_t m[6] = { 0, 45, 80, 115, 155, 190 }; return m[constrain(v, 1, 5)]; }
 
 bool micActive = false, speakerOn = false;
 void useSpeaker() {
@@ -268,6 +272,10 @@ void playTone(uint8_t tone, uint8_t vol) {
   if (tone == TONE_RECORDING) {
     if (clipBuf && clipLen) { M5.Speaker.playRaw(clipBuf, clipLen, clipRate, false, 1, 0, true); playing = nullptr; return; }
     tone = TONE_CHIME;
+  }
+  if (tone >= VOICE_FIRST && tone <= VOICE_LAST) {   // talking alert
+    const VoiceClip& v = VOICE_CLIPS[tone - VOICE_FIRST];
+    M5.Speaker.playRaw(v.pcm, v.len, VOICE_CLIP_RATE, false, 1, 0, true); playing = nullptr; return;
   }
   if (tone >= TONE_COUNT || patterns[tone].empty()) tone = TONE_CHIME;
   playing = &patterns[tone]; playIdx = 0; noteEnd = 0;
@@ -284,6 +292,40 @@ void serviceSound() {
 void chirp(uint16_t a, uint16_t b) {
   useSpeaker(); M5.Speaker.setVolume(volumeFor(min<uint8_t>(settings.volume, 3)));
   static std::vector<Note> c; c = { {a, 90}, {b, 140} }; playing = &c; playIdx = 0; noteEnd = 0;
+}
+
+void sillySound() {
+  useSpeaker(); M5.Speaker.setVolume(volumeFor(min<uint8_t>(settings.volume, 2)));
+  static std::vector<Note> s;
+  switch (random(4)) {
+    case 0: s.clear(); for (int f = 300; f <= 1100; f += 80) s.push_back({ (uint16_t)f, 12 }); break;             // boing
+    case 1: s = { {1568, 50}, {0, 30}, {1568, 50} }; break;                                                     // boop boop
+    case 2: s.clear(); for (int f = 1400; f >= 500; f -= 90) s.push_back({ (uint16_t)f, 14 }); break;             // whee-down
+    default: s = { {880, 60}, {1175, 60}, {1760, 90} };                                                          // ta-da
+  }
+  playing = &s; playIdx = 0; noteEnd = 0;
+}
+
+// ===========================================================================
+// Vibration add-on (M5Stack Unit Vibrator on the side port: yellow wire = G9)
+// ===========================================================================
+const int VIBE_PIN = 9;
+bool vibeReady = false;
+std::vector<uint16_t> vibePat; size_t vibeIdx = 0; uint32_t vibeNext = 0;
+uint32_t vibeTestUntil = 0;   // the app's "test vibration" works before the setting is saved
+bool vibeOn() { return (extras.flags & X_VIBE) || (int32_t)(vibeTestUntil - millis()) > 0; }
+void stopVibe() { if (vibeReady) { ledcWrite(VIBE_PIN, 0); vibeIdx = vibePat.size() + 1; } }
+// pattern: on, off, on, off... in milliseconds
+void buzz(std::initializer_list<uint16_t> p) {
+  if (!vibeOn()) return;
+  if (!vibeReady) { M5.Power.setExtOutput(true); vibeReady = ledcAttach(VIBE_PIN, 10000, 8); if (!vibeReady) return; }
+  vibePat.assign(p); vibeIdx = 0; vibeNext = 0;
+}
+void serviceVibe() {
+  if (!vibeReady || vibeIdx > vibePat.size() || (int32_t)(millis() - vibeNext) < 0) return;
+  if (vibeIdx == vibePat.size() || !vibeOn()) { ledcWrite(VIBE_PIN, 0); vibeIdx = vibePat.size() + 1; return; }
+  ledcWrite(VIBE_PIN, vibeIdx % 2 == 0 ? 210 : 0);
+  vibeNext = millis() + vibePat[vibeIdx++];
 }
 
 // ===========================================================================
@@ -319,32 +361,98 @@ void sleepScreen() {
 void toast(const String& t, uint32_t ms = 2500) { toastText = t; toastUntil = millis() + ms; wake(); }
 
 // --- the little face ---
-enum Mood { HAPPY, WORRIED, SLEEPY, EXCITED, NEUTRAL };
+enum Mood { HAPPY, WORRIED, SLEEPY, EXCITED, NEUTRAL,
+            WINK, TONGUE, COOL, LOVE, SURPRISED, DIZZY, CROSSEYED, KISSY, CRYING, ANGRY, GRIN };
+const Mood SILLY_FACES[] = { WINK, TONGUE, COOL, LOVE, SURPRISED, CROSSEYED, KISSY, GRIN, ANGRY, DIZZY };
+Mood sillyMood = HAPPY; uint32_t sillyUntil = 0, nextSilly = 0;
+bool sillyOn() { return (extras.flags & X_FACE) && !(extras.flags & X_CALM_FACE); }
+void makeFace(Mood m, uint32_t ms) { sillyMood = m; sillyUntil = millis() + ms; }
+Mood randomSilly() { return SILLY_FACES[random(sizeof(SILLY_FACES) / sizeof(SILLY_FACES[0]))]; }
+
+void heart(int x, int y, int s, uint16_t c) {
+  canvas.fillCircle(x - s / 2, y - s / 4, s / 2 + 1, c); canvas.fillCircle(x + s / 2, y - s / 4, s / 2 + 1, c);
+  canvas.fillTriangle(x - s - 1, y - s / 8, x + s + 1, y - s / 8, x, y + s, c);
+}
 void drawFace(int cx, int cy, int r, Mood mood, uint16_t col) {
+  uint32_t t = millis();
   canvas.fillCircle(cx, cy, r, col);
-  uint16_t ink = TFT_BLACK, white = TFT_WHITE;
+  const uint16_t ink = TFT_BLACK, white = TFT_WHITE, red = rgb(0xE5304F), pink = rgb(0xFF8FA8), blue = rgb(0x5BC0FF);
   int ex = r * 38 / 100, ey = cy - r * 18 / 100, er = max(3, r / 7);
-  bool blink = (millis() / 150) % 25 == 0;
-  if (mood == SLEEPY || blink) {
-    canvas.fillRect(cx - ex - er, ey, er * 2, 3, ink);
-    canvas.fillRect(cx + ex - er, ey, er * 2, 3, ink);
-  } else {
-    canvas.fillCircle(cx - ex, ey, er + 2, white); canvas.fillCircle(cx + ex, ey, er + 2, white);
-    int look = mood == WORRIED ? (int)(sin(millis() / 180.0) * 2) : 0;
-    canvas.fillCircle(cx - ex + look, ey + 1, er - 1, ink); canvas.fillCircle(cx + ex + look, ey + 1, er - 1, ink);
+  int lx = cx - ex, rx = cx + ex;
+  auto openEye   = [&](int x, int dx, int dy, int s) { canvas.fillCircle(x, ey, s + 2, white); canvas.fillCircle(x + dx, ey + 1 + dy, max(1, s - 1), ink); };
+  auto closedEye = [&](int x) { canvas.fillRect(x - er, ey, er * 2, 3, ink); };
+  auto happyEye  = [&](int x) { canvas.fillArc(x, ey + er / 2 + 1, er + 1, er - 2, 200, 340, ink); };   // ^
+  auto sadEye    = [&](int x) { canvas.fillArc(x, ey - er / 2, er + 1, er - 2, 20, 160, ink); };        // u
+  bool blink = (t / 150) % 25 == 0;
+
+  // cheeks
+  if (mood == LOVE || mood == KISSY || mood == GRIN) {
+    canvas.fillEllipse(cx - r * 62 / 100, cy + r / 8, r / 7, r / 11, pink);
+    canvas.fillEllipse(cx + r * 62 / 100, cy + r / 8, r / 7, r / 11, pink);
   }
-  if (mood == WORRIED) {   // eyebrows
-    canvas.drawLine(cx - ex - er, ey - er - 6, cx - ex + er, ey - er - 2, ink);
-    canvas.drawLine(cx + ex + er, ey - er - 6, cx + ex - er, ey - er - 2, ink);
+  // eyes
+  switch (mood) {
+    case SLEEPY: closedEye(lx); closedEye(rx); break;
+    case WINK:   openEye(lx, 0, 0, er); happyEye(rx); break;
+    case KISSY: case GRIN: happyEye(lx); happyEye(rx); break;
+    case CRYING: sadEye(lx); sadEye(rx); {
+                   int drop = (t / 25) % (r / 2 + 6);
+                   canvas.fillCircle(lx - 1, ey + er + 3 + drop, 3, blue); canvas.fillCircle(rx + 1, ey + er + 3 + (drop + r / 4) % (r / 2 + 6), 3, blue);
+                 } break;
+    case COOL: {
+                 int w = er * 2 + 8, h = er * 2 + 3;
+                 canvas.fillRoundRect(lx - w / 2, ey - h / 2, w, h, 4, ink); canvas.fillRoundRect(rx - w / 2, ey - h / 2, w, h, 4, ink);
+                 canvas.fillRect(lx + w / 2 - 1, ey - h / 2 + 1, rx - lx - w + 2, 3, ink);
+                 canvas.drawLine(lx - w / 2 + 3, ey - 1, lx - w / 2 + 6, ey - h / 2 + 3, white);
+                 canvas.drawLine(rx - w / 2 + 3, ey - 1, rx - w / 2 + 6, ey - h / 2 + 3, white);
+               } break;
+    case LOVE: { int s = er + 1 + (int)((t / 220) % 2); heart(lx, ey, s, red); heart(rx, ey, s, red); } break;
+    case SURPRISED: canvas.fillCircle(lx, ey, er + 5, white); canvas.fillCircle(rx, ey, er + 5, white);
+                    canvas.fillCircle(lx, ey, max(2, er - 2), ink); canvas.fillCircle(rx, ey, max(2, er - 2), ink); break;
+    case DIZZY:
+      for (int x : { lx, rx }) {
+        canvas.fillCircle(x, ey, er + 3, white);
+        int a = (t / 3) % 360;
+        canvas.fillArc(x, ey, er + 2, er, a, a + 270, ink);
+        canvas.fillArc(x, ey, er - 2, max(0, er - 4), a + 180, a + 450, ink);
+      } break;
+    case CROSSEYED: openEye(lx, 3, 0, er + 1); openEye(rx, -3, 0, er + 1); break;
+    case TONGUE: openEye(lx, 0, -2, er); openEye(rx, 0, -2, er); break;
+    case ANGRY:  openEye(lx, 1, 1, er); openEye(rx, -1, 1, er);
+                 for (int k = 0; k < 3; k++) {   // thick brows pointing down to the middle
+                   canvas.drawLine(lx - er - 2, ey - er - 7 + k, lx + er + 1, ey - er - 1 + k, ink);
+                   canvas.drawLine(rx + er + 2, ey - er - 7 + k, rx - er - 1, ey - er - 1 + k, ink);
+                 } break;
+    default:
+      if (blink) { closedEye(lx); closedEye(rx); break; }
+      { int look = mood == WORRIED ? (int)(sin(t / 180.0) * 2) : 0; openEye(lx, look, 0, er); openEye(rx, look, 0, er); }
   }
+  if (mood == WORRIED) {   // eyebrows, high in the middle
+    canvas.drawLine(lx - er, ey - er - 2, lx + er, ey - er - 6, ink);
+    canvas.drawLine(rx + er, ey - er - 2, rx - er, ey - er - 6, ink);
+  }
+  // mouth
   int my = cy + r * 35 / 100;
   switch (mood) {
-    case HAPPY:   canvas.fillArc(cx, my - r / 5, r / 2, r / 2 - 4, 20, 160, ink); break;
+    case HAPPY: case WINK: case LOVE: canvas.fillArc(cx, my - r / 5, r / 2, r / 2 - 4, 20, 160, ink); break;
     case EXCITED: canvas.fillEllipse(cx, my, r / 4, r / 6, ink); break;
     case WORRIED: canvas.fillArc(cx, my + r / 5, r / 3, r / 3 - 4, 200, 340, ink); break;
+    case CRYING:  canvas.fillArc(cx, my + r / 4, r / 3, r / 3 - 5, 200, 340, ink); break;
     case SLEEPY:  canvas.fillRect(cx - r / 6, my, r / 3, 3, ink);
                   canvas.setFont(&fonts::FreeSansBold9pt7b); canvas.setTextColor(white); canvas.setTextDatum(middle_center);
-                  canvas.drawString("z", cx + r + 6, cy - r + 4 - (millis() / 300) % 6); break;
+                  canvas.drawString("z", cx + r + 6, cy - r + 4 - (t / 300) % 6); break;
+    case TONGUE: case CROSSEYED:
+                  canvas.fillArc(cx, my - r / 5, r / 2, r / 2 - 4, 20, 160, ink);
+                  canvas.fillEllipse(cx + r / 8, my + r / 6, r / 6, r / 5, red);
+                  canvas.drawFastVLine(cx + r / 8, my + r / 12, r / 5, rgb(0x9C1B30)); break;
+    case COOL:    canvas.fillArc(cx + r / 6, my - r / 4, r / 3, r / 3 - 4, 30, 120, ink); break;
+    case SURPRISED: canvas.fillCircle(cx, my + 2, r / 5, ink); canvas.fillCircle(cx, my + 2, max(1, r / 5 - 4), rgb(0x7A1626)); break;
+    case DIZZY:   for (int i = -r / 3; i <= r / 3; i += 2) canvas.fillRect(cx + i, my + (int)(sin((i + t / 25.0) / 3.0) * 3), 2, 3, ink); break;
+    case KISSY:   canvas.fillArc(cx, my - 3, 5, 3, 270, 450, ink); canvas.fillArc(cx, my + 4, 5, 3, 270, 450, ink);
+                  heart(cx + r + 4, cy - r / 3 - (int)((t / 40) % 16), 5, red); break;
+    case ANGRY:   canvas.fillRoundRect(cx - r / 4, my, r / 2, 6, 2, ink); break;
+    case GRIN:    canvas.fillArc(cx, my - r / 6, r / 2, 0, 0, 180, ink);
+                  canvas.fillRect(cx - r / 2 + 4, my - r / 6 + 1, r - 8, 4, white); break;
     default:      canvas.fillRect(cx - r / 5, my, r * 2 / 5, 3, ink);
   }
 }
@@ -398,7 +506,7 @@ void drawScreen() {
   if (alertView || flashing) {
     bool on = (now / 250) % 2;
     canvas.fillScreen(on ? accent() : rgb(0xC81E3A));
-    drawFace(42, 62, 30, WORRIED, rgb(0xFFC93C));
+    drawFace(42, 62, 30, alertView ? ((now / 2500) % 2 ? CRYING : WORRIED) : SURPRISED, rgb(0xFFC93C));
     canvas.setFont(&fonts::FreeSansBold12pt7b); canvas.setTextDatum(middle_left); canvas.setTextColor(TFT_WHITE);
     canvas.drawString(alertView ? "Grab your" : "Here I am!", 84, 46);
     canvas.drawString(alertView ? "phone!" : "", 84, 74);
@@ -438,7 +546,8 @@ void drawScreen() {
     case SCR_HOME: {
       bool paused = dndActive();
       bool quietNow = inQuietTime();
-      Mood mood = (int32_t)(happyUntil - now) > 0 ? EXCITED : paused || quietNow ? SLEEPY : primaryUp ? HAPPY : seenPrimary ? WORRIED : NEUTRAL;
+      Mood mood = (int32_t)(happyUntil - now) > 0 ? LOVE : paused || quietNow ? SLEEPY : primaryUp ? HAPPY : seenPrimary ? WORRIED : NEUTRAL;
+      if ((int32_t)(sillyUntil - now) > 0) mood = sillyMood;
       drawTop(tagName.c_str());
       if (extras.flags & X_FACE) drawFace(52, 74, 36, mood, accent());
       int x = (extras.flags & X_FACE) ? 100 : 12;
@@ -452,7 +561,7 @@ void drawScreen() {
       if (primaryUp && !paused) drawBars(x, 88, signalLevel(), accent());
       int s = streakDays();
       if (s > 0 && x > 12) { canvas.setFont(&fonts::Font2); canvas.setTextColor(rgb(0xFFC93C)); canvas.setTextDatum(top_left); canvas.drawString(String(s) + (s == 1 ? " day streak" : " day streak"), x + 52, 100); }
-      drawHint("B: more    A x2: ring phone");
+      drawHint(sillyOn() ? "A: make a face   B: more" : "B: more    A x2: ring phone");
       break;
     }
     case SCR_FIND: {
@@ -575,8 +684,11 @@ void playAlertOnce(bool force) {
   if (force) style = STYLE_ALL;
   else if (inQuietTime()) style = settings.quietMode == 1 ? STYLE_LIGHT : STYLE_PHONE_ONLY;
   bool sound = style == STYLE_SOUND || style == STYLE_ALL;
-  bool light = style == STYLE_LIGHT || style == STYLE_VIBE_LIGHT || style == STYLE_VIBRATE || style == STYLE_ALL;
-  if (light || sound) wake();
+  bool vibe  = style == STYLE_VIBRATE || style == STYLE_VIBE_LIGHT || style == STYLE_ALL;
+  // without the vibration add-on, "vibrate" flashes the screen instead
+  bool light = style == STYLE_LIGHT || style == STYLE_VIBE_LIGHT || style == STYLE_ALL || (style == STYLE_VIBRATE && !vibeOn());
+  if (vibe) buzz({ 500, 250, 500, 250, 500 });
+  if (light || sound || vibe) wake();
   if (light) flashUntil = millis() + 3000;
   if (sound) playTone(settings.tone, settings.volume);
 }
@@ -587,7 +699,7 @@ void startAlert() {
   alerting = true; ringOnce = false; alertPlays = 0; alertStartMs = millis(); nextAlertMs = millis();
   screen = SCR_HOME;
 }
-void stopAlert() { alerting = false; ringOnce = false; flashUntil = 0; stopSound(); }
+void stopAlert() { alerting = false; ringOnce = false; flashUntil = 0; stopSound(); stopVibe(); }
 void serviceAlert() {
   if (!alerting || (int32_t)(millis() - nextAlertMs) < 0 || soundBusy()) return;
   playAlertOnce(ringOnce);
@@ -614,6 +726,19 @@ void updateMotion() {
     if (wasStill && (extras.flags & X_PICKUP_WAKE) && !alerting) {
       if (extras.flags & X_CHECKLIST) { screen = SCR_CHECK; for (bool& c : checks) c = false; }
       wake();
+    }
+  }
+  // Shake it (screen on): dizzy face
+  static uint8_t shakes = 0; static uint32_t shakeStart = 0;
+  if (fabsf(mag - lastMag) > 0.9f && screenOn && sillyOn() && !alerting) {
+    if (millis() - shakeStart > 1500) { shakeStart = millis(); shakes = 0; }
+    if (++shakes >= 4) {
+      shakes = 0; shakeStart = 0;
+      screen = SCR_HOME; makeFace(DIZZY, 3500); toast("Whoa! Dizzy!", 2000);
+      useSpeaker(); M5.Speaker.setVolume(volumeFor(2));
+      static std::vector<Note> w; w.clear();
+      for (int r = 0; r < 3; r++) for (int f = 1200; f >= 600; f -= 100) w.push_back({ (uint16_t)f, 15 });
+      playing = &w; playIdx = 0; noteEnd = 0;
     }
   }
   lastMag = mag;
@@ -682,7 +807,9 @@ void onButtonA_single() {
   if (alerting || (int32_t)(flashUntil - millis()) > 0) { stopAlert(); toast("Alert stopped"); return; }
   if (notifyUntil) { notifyUntil = 0; return; }
   switch (screen) {
-    case SCR_HOME:   if (dndActive()) { dndUntilMs = 0; toast("Alerts on"); } break;
+    case SCR_HOME:   if (dndActive()) { dndUntilMs = 0; toast("Alerts on"); }
+                     else if (sillyOn()) { Mood m; do { m = randomSilly(); } while (m == sillyMood); makeFace(m, 2500); sillySound(); }
+                     break;
     case SCR_FIND:   if (primaryUp) { notifyEvent(1); toast("Ringing your phone"); } break;
     case SCR_CHECK:  for (int i = 0; i < 4; i++) if (!checks[i]) { checks[i] = true; chirp(1047, 1319); break; } break;
     case SCR_TIMER:  timerDone = false;
@@ -824,7 +951,10 @@ void handleCommand(const uint8_t* c, uint8_t len) {
         haveClock = true;
       }
       break;
-    case 0x0A: toast(len >= 2 && c[1] ? "Hello!" : "Hi from the app"); break;                     // test the screen
+    case 0x0A: toast(len >= 2 && c[1] ? "Hello!" : "Hi from the app"); screen = SCR_HOME; makeFace(GRIN, 2500); break;   // test the screen
+    case 0x0B: vibeTestUntil = millis() + 3000; buzz({ 400, 200, 400 }); toast("Bzzz!", 1500); break;    // test vibration
+    case 0x0C: screen = SCR_HOME; wake();                                                              // pull a funny face
+               makeFace(len >= 2 && c[1] < sizeof(SILLY_FACES) ? SILLY_FACES[c[1]] : randomSilly(), 3000); sillySound(); break;
   }
 }
 
@@ -917,6 +1047,7 @@ void setupAncs() {
 void showNotification() {
   if (dndActive() || inQuietTime()) return;
   notifyUntil = millis() + (notifyCat == 1 ? 25000 : 8000);
+  if (notifyCat == 1) buzz({ 600, 300, 600, 300, 600, 300, 600 }); else buzz({ 150, 120, 150 });
   wake(notifyCat == 1 ? 25000 : 8000);
   if (!alerting) { useSpeaker(); M5.Speaker.setVolume(volumeFor(3)); static std::vector<Note> n; n = { {1175, 90}, {0, 60}, {1568, 140} }; playing = &n; playIdx = 0; noteEnd = 0; }
 }
@@ -1088,7 +1219,13 @@ void loop() {
   updateAlerts();
   serviceAlert();
   serviceSound();
+  serviceVibe();
   serviceAncs();
+  // Every so often, pull a funny face on the home screen
+  if (screenOn && screen == SCR_HOME && sillyOn() && primaryUp && !alerting && !dndActive() && (int32_t)(millis() - nextSilly) > 0) {
+    if (nextSilly) makeFace(randomSilly(), 1800);
+    nextSilly = millis() + random(12000, 30000);
+  }
   sendStatus();
 
   static uint32_t lastBatt = 0;

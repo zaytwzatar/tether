@@ -65,11 +65,13 @@ tag's clock and name automatically.
 
 When the screen is dark, the first press just wakes it (and stops an alert).
 
+**Shake it** (with the screen on) and the face gets dizzy.
+
 ## 4. The screens (press the side button to go through them)
 
 | Screen | Front button |
 |---|---|
-| **Home**: face, phone status, battery, clock, streak | — |
+| **Home**: face, phone status, battery, clock, streak | make a funny face |
 | **Find my phone**: Cold → Warm → Hot! as you get closer | ring your phone |
 | **Before you go**: your checklist ("Phone" ticks itself) | tick next item |
 | **Parking timer** | add time (hold to clear) |
@@ -83,6 +85,20 @@ Change colors, brightness, how long the screen stays on, the checklist, the
 "if found" message, caller ID and the camera remote in the app:
 **My Tags › your tag › Screen & extras**.
 
+## 5. Funny faces, talking alerts and vibration
+
+- **Funny faces:** the face winks, sticks out its tongue, wears sunglasses, gets
+  heart eyes when your phone comes back, and cries during an alert. Turn this
+  off in **Screen & extras › Funny faces**.
+- **Talking alerts:** in **Which sound?**, scroll down to **Talking alerts**
+  (for example "Hey! You forgot your phone!"). Your phone can talk too:
+  **My Phone › Talking** says "Hey! You left your *Car keys* behind!".
+- **Vibration:** the StickS3 has no motor inside. Plug an **M5Stack Unit Vibrator**
+  (SKU U059) into the port on the side, then turn on **Screen & extras ›
+  I plugged in the vibration add-on**. It buzzes for alerts, calls and texts.
+  Note: the add-on is about the size of the StickS3's face, and it uses battery
+  quickly while buzzing.
+
 ---
 
 ## Good to know
@@ -93,6 +109,8 @@ Change colors, brightness, how long the screen stays on, the checklist, the
   the tag warned you and you went back for your phone within 10 minutes.
 - **Caller ID and texts** work with iPhone only for now. Android needs the full
   native app.
+- **Loudest volume** is kept a little under full. M5Stack says full volume can
+  make the StickS3 restart when it's running on battery.
 - **Camera remote** works like a Bluetooth selfie button (it presses "volume up").
 - **First version:** this code hasn't run on a real StickS3 yet. Expect a round of
   small fixes. Tell me what you see on the screen and in the Serial Monitor.

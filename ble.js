@@ -23,7 +23,7 @@ export const THEMES = [
   { id: 3, name: 'Purple', color: '#7C5CE0' },
   { id: 4, name: 'Pink', color: '#E0457B' },
 ];
-export const XF = { face: 1, checklist: 2, camera: 4, callerId: 8, clock24: 16, pickupWake: 32 };
+export const XF = { face: 1, checklist: 2, camera: 4, callerId: 8, clock24: 16, pickupWake: 32, calmFace: 64, vibe: 128 };
 export const DEFAULT_EXTRAS = { brightness: 3, screenSecs: 10, theme: 0, flags: 1 | 2 | 4 | 8 | 32, timerStep: 15 };
 export const DEFAULT_TEXTS = { found: 'If found, please call the owner', checklist: ['Phone', 'Wallet', 'Keys', 'Water bottle'] };
 export const TEXT_KEY = { name: 1, found: 2, check0: 3 };
@@ -63,6 +63,19 @@ export const TONES = [
   { id: 14, name: 'Laser', note: 'Pew pew pew' },
   { id: 15, name: 'Twinkle', note: 'Twinkle, twinkle little star' },
   { id: 16, name: 'Fanfare', note: 'Ta-ta-ta-taaa!' },
+  // Talking alerts: recorded voices, played by the StickS3 (and previewed here)
+  { id: 17, name: 'Hey!', note: '“Hey! You forgot your phone!”', voice: true },
+  { id: 18, name: 'Don\'t forget', note: '“Don\'t forget your phone!”', voice: true },
+  { id: 19, name: 'Polite butler', note: '“Excuse me. You\'ve left your phone behind.”', voice: true },
+  { id: 20, name: 'Drama', note: '“Come back! Don\'t leave me!”', voice: true },
+  { id: 21, name: 'Phone phone phone', note: '“Phone! Phone! Phone!”', voice: true },
+  { id: 22, name: 'Uh oh', note: '“Uh oh. Somebody forgot something.”', voice: true },
+  { id: 23, name: 'Houston', note: '“Houston, we have a problem. Your phone is missing.”', voice: true },
+  { id: 24, name: 'Robot', note: '“Beep boop. Phone not detected.”', voice: true },
+  { id: 25, name: 'Misses you', note: '“Your phone misses you already.”', voice: true },
+  { id: 26, name: 'Wait!', note: '“Wait! Grab your phone!”', voice: true },
+  // Phone only: this phone speaks, using the tag's name
+  { id: 27, name: 'Talking', note: 'Says “You left your keys!” with your tag\'s name', voice: true, phoneOnly: true },
 ];
 // TONES[id] works because ids match their place in the list.
 
@@ -140,7 +153,7 @@ export function decodeStatus(dv) {
   };
 }
 
-export const CMD = { ring: 1, stop: 2, dnd: 3, flash: 4, calibrate: 5, time: 6, preview: 7, reset: 8, clock: 9, sayHi: 10 };
+export const CMD = { ring: 1, stop: 2, dnd: 3, flash: 4, calibrate: 5, time: 6, preview: 7, reset: 8, clock: 9, sayHi: 10, vibeTest: 11, face: 12 };
 
 export function bluetoothSupport() {
   if (!('bluetooth' in navigator)) {
