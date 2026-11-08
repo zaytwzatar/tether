@@ -13,6 +13,7 @@ export const UUIDS = {
   extras: uuid('08'),    // screen and extra-feature settings
   text: uuid('09'),      // name, "if found" message, checklist
   stats: uuid('0a'),     // streaks, saves, battery
+  ir: uuid('0b'),        // TV remote codes (firmware 3+)
 };
 
 export const MODELS = { 1: 'Circuit Playground', 2: 'M5StickS3' };
@@ -225,11 +226,15 @@ export class TagConnection extends EventTarget {
       }
       // Newer tags (StickS3) have a screen and extras; older ones simply don't have these
       this.model = 1;
-      for (const k of ['info', 'extras', 'text', 'stats']) {
+      for (const k of ['info', 'extras', 'text', 'stats', 'ir']) {
         try { this.chars[k] = await withTimeout(svc.getCharacteristic(UUIDS[k]), 3000, k); } catch { this.chars[k] = null; }
       }
       if (this.chars.info) {
-        try { this.model = (await withTimeout(this.chars.info.readValue(), 3000, 'info')).getUint8(0) || 1; } catch { /* keep 1 */ }
+        try {
+          const info = await withTimeout(this.chars.info.readValue(), 3000, 'info');
+          this.model = info.getUint8(0) || 1;
+          this.firmware = info.byteLength > 1 ? info.getUint8(1) : 1;
+        } catch { /* keep 1 */ }
       }
       this.chars.status.removeEventListener('characteristicvaluechanged', this.onStatus);
       this.chars.status.addEventListener('characteristicvaluechanged', this.onStatus);
@@ -297,6 +302,10 @@ export class TagConnection extends EventTarget {
   }
 
   get hasScreen() { return this.model >= 2 && !!this.chars.extras; }
+  get hasTv() { return !!this.chars.ir; }
+  // TV remote: which buttons are saved (bit mask), save/test/learn/send
+  async readTvMask() { return this.run(async () => (await this.chars.ir.readValue()).getUint8(0)); }
+  async writeIr(bytes) { return this.run(() => this.chars.ir.writeValueWithResponse(bytes)); }
   async readExtras() { return this.run(async () => decodeExtras(await this.chars.extras.readValue())); }
   async writeExtras(x) { return this.run(() => this.chars.extras.writeValueWithResponse(encodeExtras(x))); }
   async readStats() { return this.run(async () => decodeStats(await this.chars.stats.readValue())); }
@@ -342,10 +351,22 @@ export class DemoTag extends EventTarget {
     this.quiet = DEFAULT_QUIET.map((q) => ({ ...q }));
     this.rssi = -60; this.counter = 0; this.calibrating = false; this.alerting = false;
     this.dndUntil = 0; this.hasRecording = false; this.event = 0;
-    this.model = 2; this.extras = { ...DEFAULT_EXTRAS }; this.texts = {};
+    this.model = 2; this.firmware = 3; this.extras = { ...DEFAULT_EXTRAS }; this.texts = {}; this.tvMask = 0;
     this.stats = { streak: 4, saves: 2, best: 9, battery: 82, charging: false, hasNote: false, callerIdOn: false };
   }
   get hasScreen() { return true; }
+  get hasTv() { return true; }
+  async readTvMask() { await wait(60); return this.tvMask || 0; }
+  async writeIr(b) {
+    await wait(80);
+    if (b[0] === 1) this.tvMask = (this.tvMask || 0) | (1 << b[1]);
+    if (b[0] === 3) this.tvMask = 0;
+    if (b[0] === 4) {   // pretend the user points a remote at it after 2 seconds
+      clearTimeout(this.learnTimer);
+      this.learnTimer = setTimeout(() => { this.tvMask = (this.tvMask || 0) | (1 << b[1]); this.event = 3; this.counter++; this.tick(); }, 2000);
+    }
+    if (b[0] === 6) clearTimeout(this.learnTimer);
+  }
   async readExtras() { return { ...this.extras }; }
   async writeExtras(x) { await wait(120); this.extras = { ...x }; }
   async readStats() { return { ...this.stats }; }

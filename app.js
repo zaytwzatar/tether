@@ -4,6 +4,7 @@ import {
   feetToRssi, rssiToFeet, CMD, THEMES, XF, DEFAULT_EXTRAS, DEFAULT_TEXTS, TEXT_KEY,
 } from './ble.js';
 import { playPattern, startAlarm, stopAlarm, Recorder, playPcm } from './sounds.js';
+import { loadTvCodes, encodeTv, irPacket, TV_LABELS } from './ir.js';
 
 // ===========================================================================
 // Saved data (stays on this device only)
@@ -58,6 +59,7 @@ function newTag(id, deviceName, demo) {
     phone: { leave: true, alarm: false, saveLocation: true },
     pausedUntil: 0, lastSeen: null, needsSync: false, addedAt: Date.now(),
     model: 1, extras: { ...DEFAULT_EXTRAS },
+    tv: { brand: '', set: 0, mask: 0 },
     texts: { found: DEFAULT_TEXTS.found, checklist: [...DEFAULT_TEXTS.checklist] },
     stats: null,
   };
@@ -95,6 +97,9 @@ function attach(tag, conn) {
 async function afterConnect(tag) {
   const conn = live.get(tag.id);
   tag.model = conn.model || 1;
+  tag.firmware = conn.firmware || 1;
+  if (!tag.tv) tag.tv = { brand: '', set: 0, mask: 0 };
+  if (conn.hasTv) tag.tv.mask = await conn.readTvMask().catch(() => tag.tv.mask);
   if (tag.needsSync || tag.demo) await pushToTag(tag);
   else {
     const fromTag = await conn.readSettings();
@@ -235,6 +240,18 @@ function onStatus(id, st) {
       startAlarm(store.phone.tone, { say: 'Here I am! Over here!' });
       notify('Here is your phone!', tag.name + ' is calling your phone.');
       openModal({ type: 'phone', id });
+    }
+    if (st.event === 3 && ui.tvLearn?.id === id) {   // learned a button from an old remote
+      const slot = ui.tvLearn.slot;
+      ui.tvLearn = null;
+      tag.tv.mask |= 1 << slot; save();
+      toast('Got it! ' + TV_LABELS[slot] + ' is saved.');
+      render();
+    }
+    if (st.event === 4 && ui.tvLearn?.id === id) {
+      ui.tvLearn = null;
+      toast('The tag didn\'t hear your remote. Hold the remote close to the tag and try again.');
+      render();
     }
     if (st.event === 2) {
       tag.settings.threshold = st.threshold;
@@ -765,6 +782,7 @@ function viewTag(tag) {
       ${settingRow(`#/tag/${enc(tag.id)}/sound`, 'music', 'yellow', 'Which sound?', `${TONES[set.tone]?.name}, volume ${set.volume}, ${set.repeat ? set.repeat === 1 ? 'once' : set.repeat + ' times' : 'until it\'s back'}`)}
       ${settingRow(`#/tag/${enc(tag.id)}/quiet`, 'moon', 'purple', 'Quiet times', quietOn.length ? quietOn.map((q) => `${q.name} ${fmtMin(q.start)}–${fmtMin(q.end)}`).join(', ') : 'None set')}
       ${screenTag ? settingRow(`#/tag/${enc(tag.id)}/screen`, 'screen', 'green', 'Screen & extras', `${THEMES[tag.extras.theme]?.name || 'Orange'} theme, checklist, “if found”, caller ID`) : ''}
+      ${screenTag ? settingRow(`#/tag/${enc(tag.id)}/tv`, 'remote', 'blue', 'TV remote', tvSummary(tag)) : ''}
       ${settingRow(`#/distance/${enc(tag.id)}`, 'ruler', 'orange', 'How far?', `About ${fmtDist(rssiToFeet(set.threshold))} · in Settings`)}
     </nav>
 
@@ -883,6 +901,91 @@ function settingRow(href, ic, color, title, sub) {
 function toggle(bind, on, title, sub, extra = '') {
   return `<label class="toggle"><span class="grow"><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>
     <input type="checkbox" class="switch" role="switch" data-bind="${bind}" ${extra} ${on ? 'checked' : ''}></label>`;
+}
+
+
+// ----- TV remote: pick a brand and test codes, or teach buttons from an old remote -----
+function tvSummary(tag) {
+  const n = TV_LABELS.filter((_, i) => tag.tv?.mask & (1 << i)).length;
+  return n ? `${tag.tv.brand || 'Your TV'} · ${n} button${n === 1 ? '' : 's'}` : 'Not set up';
+}
+function viewTv(tag) {
+  if (!tag.tv) tag.tv = { brand: '', set: 0, mask: 0 };
+  const tv = tag.tv;
+  const conn = live.get(tag.id);
+  const connected = isConnected(tag.id);
+  const needsUpdate = connected && conn && !conn.hasTv;
+  if (!ui.tvDb && !ui.tvDbLoading) {
+    ui.tvDbLoading = true;
+    loadTvCodes().then((db) => { ui.tvDb = db; ui.tvDbLoading = false; render(); }).catch(() => { ui.tvDbLoading = false; });
+  }
+  const db = ui.tvDb;
+  const sets = db && tv.brand ? db.brands[tv.brand] || [] : [];
+  const setIdx = Math.min(tv.set || 0, Math.max(0, sets.length - 1));
+  const learning = ui.tvLearn?.id === tag.id ? ui.tvLearn.slot : -1;
+  const can = connected && !needsUpdate;
+  const rows = TV_LABELS.map((label, i) => {
+    const saved = !!(tv.mask & (1 << i));
+    if (learning === i) {
+      return `<div class="tv-row learning"><span class="grow"><b>${label}</b><small>Point your old remote at the tag and press <b>${label}</b>…</small></span>
+        <button type="button" class="btn ghost" data-action="tv-learn-stop" data-id="${esc(tag.id)}">Cancel</button></div>`;
+    }
+    return `<div class="tv-row"><span class="grow"><b>${label}</b><small class="${saved ? 'ok-text' : ''}">${saved ? '✓ Saved' : 'Not set'}</small></span>
+      <span class="tv-btns">${saved && can ? `<button type="button" class="btn soft small" data-action="tv-send" data-id="${esc(tag.id)}" data-slot="${i}">Test</button>` : ''}
+      ${can ? `<button type="button" class="btn soft small" data-action="tv-learn" data-id="${esc(tag.id)}" data-slot="${i}" ${learning >= 0 ? 'disabled' : ''}>Teach</button>` : ''}</span></div>`;
+  }).join('');
+  return `
+    ${back('#/tag/' + enc(tag.id), tag.name)}
+    <div class="narrow">
+    ${badge('tag', 'Tag settings · ' + tag.name)}
+    <header><h1>TV remote</h1><p class="lead">Turn your TV on and off, change the volume and more, right from the tag.</p></header>
+    ${notConnectedNote(tag)}
+    ${needsUpdate ? `<p class="note k-away">${icon('bt', 18)}<span>Update ${esc(tag.name)}'s software to use the TV remote: upload the newest TetherS3 code from GitHub, the same way as before.</span></p>` : ''}
+
+    <section class="card pad stack">
+      <h2 class="h2">1. Pick your TV brand</h2>
+      <label class="field"><span>TV brand</span>
+        <select data-bind="tv-brand">
+          <option value="" ${!tv.brand ? 'selected' : ''}>Choose…</option>
+          ${db ? Object.keys(db.brands).map((b) => `<option value="${esc(b)}" ${tv.brand === b ? 'selected' : ''}>${esc(b === 'Roku TV' ? 'Roku TV (TCL, onn, Hisense with Roku…)' : b)}</option>`).join('') : ''}
+        </select></label>
+      <p class="muted">Not on the list? Teach the buttons from your old remote in step 3.</p>
+    </section>
+
+    ${tv.brand && sets.length ? `
+    <section class="card pad stack">
+      <h2 class="h2">2. Find the code that works</h2>
+      <p class="muted">Stand a few feet from the TV and point the top of the tag at it.</p>
+      <p><b>Code ${setIdx + 1} of ${sets.length}</b> · ${TV_LABELS.filter((_, i) => sets[setIdx][['power', 'volUp', 'volDown', 'mute', 'chUp', 'chDown', 'input', 'home'][i]]).length} buttons</p>
+      <div class="row2">
+        <button type="button" class="btn primary" data-action="tv-try" data-id="${esc(tag.id)}" data-slot="0" ${can ? '' : 'disabled'}>${icon('remote', 20)}Try Power</button>
+        <button type="button" class="btn soft" data-action="tv-try" data-id="${esc(tag.id)}" data-slot="1" ${can ? '' : 'disabled'}>Try Volume +</button>
+      </div>
+      <p>Did your TV react?</p>
+      <div class="row2">
+        <button type="button" class="btn good" data-action="tv-save-set" data-id="${esc(tag.id)}" ${can ? '' : 'disabled'}>Yes, use this one</button>
+        <button type="button" class="btn soft" data-action="tv-next-set" data-id="${esc(tag.id)}">${setIdx + 1 < sets.length ? 'No, try the next' : 'No, start over'}</button>
+      </div>
+      ${setIdx + 1 >= sets.length ? '<p class="muted">Tried them all? Teach the buttons from your old remote below.</p>' : ''}
+    </section>` : ''}
+
+    <section class="card pad stack">
+      <h2 class="h2">${tv.brand && sets.length ? '3.' : '2.'} Or teach it from your old remote</h2>
+      <p class="muted">Tap Teach, then point your old remote at the tag from close up and press the same button. You can also use this to fix one button.</p>
+      <div class="tv-list">${rows}</div>
+      ${tv.mask && can ? `<button type="button" class="btn ghost danger" data-action="tv-clear" data-id="${esc(tag.id)}">Remove all TV buttons</button>` : ''}
+    </section>
+
+    <section class="card pad stack">
+      <h2 class="h2">Using it on the tag</h2>
+      <p>Press the side button until you see <b>TV remote</b>.</p>
+      <ul class="plain-list">
+        <li><b>Front button</b>: send the button shown</li>
+        <li><b>Press twice</b>: next button (Power, Volume +…)</li>
+        <li><b>Hold</b>: keep turning the volume or channel</li>
+      </ul>
+    </section>
+    </div>`;
 }
 
 // ----- My Phone: everything THIS PHONE does -----
@@ -1253,7 +1356,7 @@ function pageKey() {
   if (r.page === 'distance' || (r.page === 'tag' && r.sub && r.sub !== 'lastseen')) {
     const t = tagById(r.id);
     const st = t && status.get(t.id);
-    return [location.hash, store.textSize, store.units, ui.untilBack.size, t && isConnected(t.id), st?.calibrating, st?.hasRecording, t?.model, t?.settings.threshold].join('#');
+    return [location.hash, store.textSize, store.units, ui.untilBack.size, t && isConnected(t.id), st?.calibrating, st?.hasRecording, t?.model, t?.settings.threshold, t?.tv?.mask, JSON.stringify(ui.tvLearn)].join('#');
   }
   const tags = store.tags.map((t) => {
     const st = status.get(t.id);
@@ -1290,6 +1393,7 @@ function render() {
     else if (r.sub === 'quiet') html = viewQuiet(tag);
     else if (r.sub === 'lastseen') html = viewLastSeen(tag);
     else if (r.sub === 'screen') html = viewScreen(tag);
+    else if (r.sub === 'tv') html = viewTv(tag);
     else { ui.draftKey = ''; html = viewTag(tag); }
   } else if (r.page === 'distance') { zone = 'settings'; html = viewDistance(tag); }
   else {
@@ -1365,6 +1469,65 @@ const actions = {
   'sx-bright'(el) { ui.draft.extras.brightness = Number(el.dataset.v); render(); },
   'sx-secs'(el) { ui.draft.extras.screenSecs = Number(el.dataset.v); render(); },
   'sx-step'(el) { ui.draft.extras.timerStep = Number(el.dataset.v); render(); },
+  // TV remote
+  async 'tv-try'(el) {
+    const tag = tagById(el.dataset.id); const conn = live.get(tag.id);
+    const slot = Number(el.dataset.slot);
+    const set = ui.tvDb?.brands[tag.tv.brand]?.[tag.tv.set || 0];
+    const enc = set && encodeTv(set[['power', 'volUp'][slot]], ui.tvDb.protocols);
+    if (!enc) { toast('This code has no ' + TV_LABELS[slot] + ' button. Try the other one.'); return; }
+    try { await conn.writeIr(irPacket(2, slot, enc)); toast('Sent ' + TV_LABELS[slot] + '. Did the TV react?'); }
+    catch { toast('Could not reach ' + tag.name + '. Try again.'); }
+  },
+  'tv-next-set'(el) {
+    const tag = tagById(el.dataset.id);
+    const n = ui.tvDb?.brands[tag.tv.brand]?.length || 1;
+    tag.tv.set = ((tag.tv.set || 0) + 1) % n; save(); render();
+  },
+  async 'tv-save-set'(el) {
+    const tag = tagById(el.dataset.id); const conn = live.get(tag.id);
+    const set = ui.tvDb?.brands[tag.tv.brand]?.[tag.tv.set || 0];
+    if (!set || !conn?.connected) return;
+    el.disabled = true; el.textContent = 'Saving…';
+    try {
+      await conn.writeIr(new Uint8Array([3]));
+      let mask = 0;
+      for (const [i, key] of ['power', 'volUp', 'volDown', 'mute', 'chUp', 'chDown', 'input', 'home'].entries()) {
+        const enc = encodeTv(set[key], ui.tvDb.protocols);
+        if (enc) { await conn.writeIr(irPacket(1, i, enc)); mask |= 1 << i; }
+      }
+      tag.tv.mask = await conn.readTvMask().catch(() => mask); save();
+      toast('Saved! Find “TV remote” on the tag with the side button.');
+    } catch { toast('Could not reach ' + tag.name + '. Try again.'); }
+    render();
+  },
+  async 'tv-learn'(el) {
+    const tag = tagById(el.dataset.id); const conn = live.get(tag.id);
+    const slot = Number(el.dataset.slot);
+    try {
+      await conn.writeIr(new Uint8Array([4, slot]));
+      ui.tvLearn = { id: tag.id, slot };
+      clearTimeout(ui.tvLearnTimer);
+      ui.tvLearnTimer = setTimeout(() => { if (ui.tvLearn?.slot === slot) { ui.tvLearn = null; render(); } }, 17000);
+    } catch { toast('Could not reach ' + tag.name + '. Try again.'); }
+    render();
+  },
+  async 'tv-learn-stop'(el) {
+    const conn = live.get(el.dataset.id);
+    ui.tvLearn = null; render();
+    await conn?.writeIr(new Uint8Array([6])).catch(() => {});
+  },
+  async 'tv-send'(el) {
+    const tag = tagById(el.dataset.id); const conn = live.get(tag.id);
+    const slot = Number(el.dataset.slot);
+    try { await conn.writeIr(new Uint8Array([5, slot])); toast('Sent ' + TV_LABELS[slot] + '.'); } catch { toast('Could not reach ' + tag.name + '. Try again.'); }
+  },
+  async 'tv-clear'(el) {
+    const tag = tagById(el.dataset.id); const conn = live.get(tag.id);
+    if (!confirm('Remove all TV buttons from ' + tag.name + '?')) return;
+    try { await conn.writeIr(new Uint8Array([3])); tag.tv.mask = 0; save(); toast('TV buttons removed.'); } catch { toast('Could not reach ' + tag.name + '. Try again.'); }
+    render();
+  },
   async 'make-face'(el) { if (await command(tagById(el.dataset.id), CMD.face, 255)) toast('Look at the tag!'); },
   async 'test-vibe'(el) { if (await command(tagById(el.dataset.id), CMD.vibeTest)) toast('The tag should buzz twice.'); },
   async 'say-hi'(el) { if (await command(tagById(el.dataset.id), CMD.sayHi, 1)) toast('Look at the tag\'s screen!'); },
@@ -1617,6 +1780,7 @@ function onInput(el, final) {
       return;
     }
     case 'sx-item': ui.draft.texts.checklist[i] = el.value; return;
+    case 'tv-brand': tag.tv = { ...(tag.tv || { mask: 0 }), brand: el.value, set: 0 }; save(); render(); return;
     case 'sx-found': ui.draft.texts.found = el.value; return;
     case 'ph-popup': store.phone.popup = el.checked; save(); return;
     case 'ph-vibrate': store.phone.vibrate = el.checked; save(); if (el.checked) navigator.vibrate?.(200); return;

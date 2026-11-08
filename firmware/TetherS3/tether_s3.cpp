@@ -24,6 +24,7 @@ static const char* UUID_INFO     = TETHER_UUID("07");   // what this tag can do 
 static const char* UUID_EXTRAS   = TETHER_UUID("08");   // screen and extra-feature settings
 static const char* UUID_TEXT     = TETHER_UUID("09");   // name, "if found" message, checklist
 static const char* UUID_STATS    = TETHER_UUID("0a");   // streaks, saves, battery
+static const char* UUID_IR       = TETHER_UUID("0b");   // TV remote codes (save, test, learn)
 
 // iPhone notifications (Apple Notification Center Service), used for caller ID
 static const char* ANCS_SERVICE = "7905F431-B5CE-4E99-A40F-4B1E122D00D0";
@@ -32,7 +33,7 @@ static const char* ANCS_CONTROL = "69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9";
 static const char* ANCS_DATA    = "22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB";
 
 static const uint8_t MODEL_STICKS3 = 2;
-static const uint8_t FW_VERSION = 2;   // 2: talking alerts, funny faces, vibration add-on
+static const uint8_t FW_VERSION = 3;   // 2: talking alerts, funny faces, vibration add-on  3: TV remote, voice changer
 
 // ===========================================================================
 // Settings (same layout as the Circuit Playground version)
@@ -84,7 +85,7 @@ struct Stats { int32_t firstDay = -1; int32_t lastForgotDay = -1; uint16_t saves
 // Live state
 // ===========================================================================
 NimBLEServer* server = nullptr;
-NimBLECharacteristic *settingsChr, *commandChr, *statusChr, *audioChr, *quietChr, *infoChr, *extrasChr, *textChr, *statsChr;
+NimBLECharacteristic *settingsChr, *commandChr, *statusChr, *audioChr, *quietChr, *infoChr, *extrasChr, *textChr, *statsChr, *irChr = nullptr;
 NimBLEHIDDevice* hid = nullptr;
 NimBLECharacteristic* hidInput = nullptr;
 
@@ -117,6 +118,26 @@ const uint32_t CLIP_MAX = 40000;
 
 // Voice note
 uint8_t* noteBuf = nullptr; uint32_t noteLen = 0; const uint32_t VOICE_RATE = 8000, VOICE_MAX = VOICE_RATE * 10;
+
+// TV remote: IR LED on G46, IR receiver on G42
+const int IR_TX = 46, IR_RX = 42;
+const uint8_t TV_SLOTS = 8, TV_MAX = 250;
+const char* TV_NAMES[TV_SLOTS] = { "Power", "Volume +", "Volume -", "Mute", "Channel +", "Channel -", "Input", "Home" };
+struct TvCode { uint16_t khz; uint16_t n; uint16_t t[TV_MAX]; };
+TvCode* tvCodes = nullptr;          // in PSRAM
+uint8_t tvMask = 0, tvSel = 0;      // which buttons are saved; which one is picked on the screen
+bool irTxReady = false, irRxOn = false;
+int8_t learnSlot = -1; uint32_t learnUntil = 0;
+uint32_t irLastUse = 0, tvSentFlash = 0;
+uint8_t irPend[520]; volatile uint16_t irPendLen = 0;
+rmt_data_t irRx[200]; size_t irRxCount = 0;
+
+// Voice changer
+const uint32_t FX_RATE = 16000, FX_MAX = FX_RATE * 6, FX_OUT = FX_MAX + FX_RATE * 2;
+const char* FX_NAMES[] = { "Chipmunk", "Monster", "Robot", "Alien", "Echo", "Backwards" };
+const uint8_t FX_COUNT = 6;
+int16_t* fxIn = nullptr; int16_t* fxOut = nullptr;
+uint32_t fxLen = 0, fxPos = 0; bool fxRecording = false; uint8_t fxEffect = 0;
 bool recordingNote = false; uint32_t notePos = 0;
 
 // Parking timer
@@ -318,7 +339,8 @@ void stopVibe() { if (vibeReady) { ledcWrite(VIBE_PIN, 0); vibeIdx = vibePat.siz
 // pattern: on, off, on, off... in milliseconds
 void buzz(std::initializer_list<uint16_t> p) {
   if (!vibeOn()) return;
-  if (!vibeReady) { M5.Power.setExtOutput(true); vibeReady = ledcAttach(VIBE_PIN, 10000, 8); if (!vibeReady) return; }
+  M5.Power.setExtOutput(true);   // the side port's 5V (the TV remote may have turned it off)
+  if (!vibeReady) { vibeReady = ledcAttach(VIBE_PIN, 10000, 8); if (!vibeReady) return; }
   vibePat.assign(p); vibeIdx = 0; vibeNext = 0;
 }
 void serviceVibe() {
@@ -332,7 +354,7 @@ void serviceVibe() {
 // Screen
 // ===========================================================================
 M5Canvas canvas(&M5.Display);
-enum Screen : uint8_t { SCR_HOME = 0, SCR_FIND, SCR_CHECK, SCR_TIMER, SCR_NOTE, SCR_CAMERA, SCR_LIGHT, SCR_FOUND, SCR_STATS, SCR_COUNT };
+enum Screen : uint8_t { SCR_HOME = 0, SCR_FIND, SCR_TV, SCR_CHECK, SCR_TIMER, SCR_NOTE, SCR_VOICEFX, SCR_CAMERA, SCR_LIGHT, SCR_FOUND, SCR_STATS, SCR_COUNT };
 Screen screen = SCR_HOME;
 bool screenOn = true; uint32_t lastActivity = 0;
 uint32_t flashUntil = 0;            // light alert
@@ -625,6 +647,56 @@ void drawScreen() {
       drawHint("hold A: record    A: play");
       break;
     }
+    case SCR_TV: {
+      drawTop("TV remote");
+      if (learnSlot >= 0) {
+        int p = (now / 90) % 14;
+        canvas.fillRoundRect(16, 52, 30, 52, 6, rgb(0x5B5670)); canvas.fillCircle(31, 62, 5, rgb(0xE5304F));
+        for (int i = 0; i < 3; i++) canvas.drawArc(31, 50, 10 + i * 8 + p / 3, 9 + i * 8 + p / 3, 230, 310, accent());
+        canvas.setFont(&fonts::FreeSans9pt7b); canvas.setTextDatum(top_left); canvas.setTextColor(TFT_WHITE);
+        canvas.drawString("Point your old remote", 60, 44);
+        canvas.drawString("at me and press", 60, 64);
+        canvas.setFont(&fonts::FreeSansBold12pt7b); canvas.setTextColor(accent());
+        canvas.drawString(TV_NAMES[learnSlot], 60, 86);
+        break;
+      }
+      if (!tvMask) {
+        bigText("Not set up yet", 56, TFT_WHITE);
+        canvas.setFont(&fonts::FreeSans9pt7b); canvas.setTextColor(rgb(0xD6D1E6));
+        canvas.drawString("Set it up in the app:", 120, 84); canvas.drawString("your tag > TV remote", 120, 102);
+        break;
+      }
+      bool flash = (int32_t)(tvSentFlash - now) > 0;
+      canvas.fillRoundRect(10, 38, 220, 56, 12, flash ? TFT_WHITE : accent());
+      canvas.setFont(&fonts::FreeSansBold18pt7b); canvas.setTextDatum(middle_center); canvas.setTextColor(flash ? accent() : TFT_WHITE);
+      canvas.drawString(TV_NAMES[tvSel], 120, 66);
+      int count = 0; for (int i = 0; i < TV_SLOTS; i++) if (tvMask & (1 << i)) count++;
+      int x = 120 - (count - 1) * 7;
+      for (int i = 0; i < TV_SLOTS; i++) if (tvMask & (1 << i)) { canvas.fillCircle(x, 104, i == tvSel ? 4 : 2, i == tvSel ? TFT_WHITE : rgb(0x8A8399)); x += 14; }
+      drawHint("A: send   A x2: next   hold: repeat");
+      break;
+    }
+    case SCR_VOICEFX: {
+      drawTop("Voice changer");
+      if (fxRecording) {
+        canvas.fillCircle(120, 62, 22 + (now / 120) % 6, rgb(0xC81E3A));
+        bigText("Talk now...", 104, TFT_WHITE, &fonts::FreeSans9pt7b);
+      } else {
+        // a little mouth that talks while it plays
+        bool talking = M5.Speaker.isPlaying();
+        int open = talking ? 4 + (now / 70) % 10 : 3;
+        canvas.fillRoundRect(16, 40, 64, 56, 14, accent());
+        canvas.fillCircle(34, 58, 5, TFT_WHITE); canvas.fillCircle(62, 58, 5, TFT_WHITE);
+        canvas.fillCircle(34, 59, 2, TFT_BLACK); canvas.fillCircle(62, 59, 2, TFT_BLACK);
+        canvas.fillRoundRect(36, 76 - open / 2, 24, open + 2, 3, TFT_BLACK);
+        canvas.setFont(&fonts::FreeSansBold12pt7b); canvas.setTextDatum(middle_left); canvas.setTextColor(TFT_WHITE);
+        canvas.drawString(FX_NAMES[fxEffect], 92, 60);
+        canvas.setFont(&fonts::Font2); canvas.setTextColor(rgb(0xD6D1E6));
+        canvas.drawString(fxLen ? "A: next voice" : "Hold A and talk", 92, 84);
+      }
+      drawHint("hold A: talk    A: next voice");
+      break;
+    }
     case SCR_CAMERA: {
       drawTop("Camera remote");
       canvas.fillRoundRect(84, 42, 72, 48, 8, accent());
@@ -792,6 +864,196 @@ void playNote() {
   M5.Speaker.playRaw(noteBuf, noteLen, VOICE_RATE, false, 1, 0, true);
 }
 
+
+// ===========================================================================
+// TV remote (IR LED on G46, IR receiver on G42; both powered from the 5V port rail)
+// A saved button is a list of on/off times in microseconds, starting with "on".
+// The app builds them from the TV-code list, or the tag learns them from an old remote.
+// ===========================================================================
+
+void irPower() { M5.Power.setExtOutput(true); irLastUse = millis(); }
+void loadTv() {
+  tvMask = 0;
+  if (!tvCodes) return;
+  if (File f = LittleFS.open("/tv.bin", "r")) { f.read((uint8_t*)tvCodes, sizeof(TvCode) * TV_SLOTS); f.close(); }
+  for (int i = 0; i < TV_SLOTS; i++) if (tvCodes[i].n >= 4 && tvCodes[i].n <= TV_MAX) tvMask |= 1 << i; else tvCodes[i].n = 0;
+  while (tvMask && !(tvMask & (1 << tvSel))) tvSel = (tvSel + 1) % TV_SLOTS;
+}
+void saveTv() {
+  if (File f = LittleFS.open("/tv.bin", "w")) { f.write((uint8_t*)tvCodes, sizeof(TvCode) * TV_SLOTS); f.close(); }
+  loadTv();
+  uint8_t m = tvMask; irChr->setValue(&m, 1);
+}
+// Send one code. Times over 32 ms are split, since one RMT step holds at most 32767 us.
+void irSend(uint16_t khz, const uint16_t* t, uint16_t n) {
+  if (!n) return;
+  irPower();
+  if (!irTxReady) { irTxReady = rmtInit(IR_TX, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 1000000); rmtSetEOT(IR_TX, 0); }
+  if (!irTxReady) { toast("IR error"); return; }
+  rmtSetCarrier(IR_TX, true, true, (uint32_t)constrain(khz, 30, 60) * 1000, 0.33f);
+  static rmt_data_t sym[TV_MAX + 40];
+  size_t k = 0; int half = 0;
+  auto put = [&](bool level, uint32_t d) {
+    while (d && k < sizeof(sym) / sizeof(sym[0])) {
+      uint16_t part = d > 32767 ? 32767 : d; d -= part;
+      if (half == 0) { sym[k].level0 = level; sym[k].duration0 = part; half = 1; }
+      else { sym[k].level1 = level; sym[k].duration1 = part; half = 0; k++; }
+    }
+  };
+  for (uint16_t i = 0; i < n; i++) put(i % 2 == 0, t[i]);
+  if (half) { sym[k].level1 = 0; sym[k].duration1 = 100; k++; }
+  rmtWrite(IR_TX, sym, k, 300);
+}
+void tvPress(uint8_t slot) {
+  if (!(tvMask & (1 << slot))) return;
+  irSend(tvCodes[slot].khz, tvCodes[slot].t, tvCodes[slot].n);
+  tvSentFlash = millis() + 250;
+}
+
+// Learning: listen to an old remote for up to 15 seconds
+void startLearn(uint8_t slot) {
+  if (slot >= TV_SLOTS) return;
+  stopSound(); if (speakerOn) { M5.Speaker.end(); speakerOn = false; }   // the speaker amp drowns out the receiver
+  irPower();
+  if (!irRxOn) {
+    irRxOn = rmtInit(IR_RX, RMT_RX_MODE, RMT_MEM_NUM_BLOCKS_4, 1000000);
+    if (!irRxOn) { toast("IR error"); notifyEvent(4); return; }
+    rmtSetRxMaxThreshold(IR_RX, 15000);   // 15 ms of quiet = end of a code
+    rmtSetRxMinThreshold(IR_RX, 100);     // ignore blips under 0.1 ms
+  }
+  irRxCount = sizeof(irRx) / sizeof(irRx[0]);
+  rmtReadAsync(IR_RX, irRx, &irRxCount);
+  learnSlot = slot; learnUntil = millis() + 15000;
+  screen = SCR_TV; tvSel = slot; wake();
+}
+void endLearn() {
+  learnSlot = -1;
+  if (irRxOn) { rmtDeinit(IR_RX); irRxOn = false; }
+}
+void serviceLearn() {
+  if (learnSlot < 0) return;
+  if ((int32_t)(millis() - learnUntil) > 0) { endLearn(); notifyEvent(4); toast("Didn't hear a remote"); return; }
+  if (!rmtReceiveCompleted(IR_RX)) return;
+  // The receiver pulls its pin low while it sees IR, so low = "on"
+  TvCode& c = tvCodes[learnSlot];
+  uint16_t n = 0; int lastLevel = -1;
+  for (size_t i = 0; i < irRxCount && n < TV_MAX; i++) {
+    for (int h = 0; h < 2; h++) {
+      uint16_t d = h ? irRx[i].duration1 : irRx[i].duration0;
+      int on = (h ? irRx[i].level1 : irRx[i].level0) == 0;
+      if (!d) { i = irRxCount; break; }
+      if (n == 0 && !on) continue;                 // skip leading quiet
+      if (on == lastLevel && n) { c.t[n - 1] = min<uint32_t>(65535, c.t[n - 1] + d); continue; }
+      if (n < TV_MAX) c.t[n++] = d; lastLevel = on;
+    }
+  }
+  if (n % 2 == 0 && n) n--;                        // end on an "on"
+  if (n < 12) {                                    // too short: noise, listen again
+    irRxCount = sizeof(irRx) / sizeof(irRx[0]); rmtReadAsync(IR_RX, irRx, &irRxCount); return;
+  }
+  // Sony remotes expect the code 3 times
+  if (c.t[0] > 2000 && c.t[0] < 2800 && n <= 42 && n * 3 + 2 <= TV_MAX) {
+    uint32_t len = 0; for (int i = 0; i < n; i++) len += c.t[i];
+    uint16_t gap = len < 44000 ? 45000 - len : 2000;
+    for (int r = 1; r < 3; r++) { c.t[r * (n + 1) - 1] = gap; memcpy(&c.t[r * (n + 1)], c.t, n * 2); }
+    n = n * 3 + 2;
+  }
+  c.n = n; c.khz = 38;
+  uint8_t slot = learnSlot;
+  endLearn(); saveTv();
+  notifyEvent(3);
+  toast(String("Learned ") + TV_NAMES[slot] + "!"); chirp(1568, 2093);
+}
+
+// Writes from the app: [1 save | 2 test, slot, kHz, times (u16 little endian)...], [3 clear], [4 learn, slot], [5 send saved, slot]
+void handleIr(const uint8_t* d, uint16_t len) {
+  if (!tvCodes || !len) return;
+  switch (d[0]) {
+    case 1: case 2: {
+      if (len < 3 + 8 || d[1] >= TV_SLOTS) return;
+      uint16_t n = min<uint16_t>((len - 3) / 2, TV_MAX);
+      static TvCode tmp; TvCode& c = d[0] == 1 ? tvCodes[d[1]] : tmp;
+      c.khz = d[2]; c.n = n;
+      for (uint16_t i = 0; i < n; i++) c.t[i] = d[3 + i * 2] | (d[4 + i * 2] << 8);
+      if (d[0] == 1) saveTv(); else { irSend(c.khz, c.t, c.n); toast(String("Sent ") + TV_NAMES[d[1]], 1200); }
+      break;
+    }
+    case 3: for (int i = 0; i < TV_SLOTS; i++) tvCodes[i].n = 0; saveTv(); break;
+    case 4: if (len >= 2) startLearn(d[1]); break;
+    case 5: if (len >= 2) { tvPress(d[1]); toast(String("Sent ") + TV_NAMES[d[1] % TV_SLOTS], 1200); } break;
+    case 6: endLearn(); break;
+  }
+}
+void nextTvButton() {
+  if (!tvMask) return;
+  do { tvSel = (tvSel + 1) % TV_SLOTS; } while (!(tvMask & (1 << tvSel)));
+}
+
+// ===========================================================================
+// Voice changer: hold to talk, let go to hear it back funny
+// ===========================================================================
+
+void startFx() {
+  if (!fxIn) return;
+  stopSound(); if (speakerOn) { M5.Speaker.end(); speakerOn = false; }
+  if (!M5.Mic.begin()) { useSpeaker(); toast("Mic error"); return; }
+  micActive = true; fxRecording = true; fxPos = 0;
+}
+void serviceFx() {
+  if (!fxRecording) return;
+  const uint32_t CH = 800;
+  if (M5.Mic.isRecording() < 2 && fxPos + CH <= FX_MAX) { M5.Mic.record(fxIn + fxPos, CH, FX_RATE); fxPos += CH; }
+}
+void playFx() {
+  if (!fxLen) { toast("Hold A and talk"); return; }
+  uint32_t n = fxLen, rate = FX_RATE;
+  const float TWO_PI_F = 6.2831853f;
+  switch (fxEffect) {
+    case 0: memcpy(fxOut, fxIn, n * 2); rate = FX_RATE * 16 / 10; break;          // faster = higher
+    case 1: memcpy(fxOut, fxIn, n * 2); rate = FX_RATE * 68 / 100; break;         // slower = deeper
+    case 2:                                                                        // robot: ring modulation + metal ring
+      for (uint32_t i = 0; i < n; i++) {
+        float m = sinf(TWO_PI_F * 70.0f * i / FX_RATE);
+        float y = fxIn[i] * m + (i >= 96 ? 0.45f * fxOut[i - 96] : 0);
+        fxOut[i] = (int16_t)constrain((int)y, -32767, 32767);
+      } break;
+    case 3:                                                                        // alien: fast wobble
+      { float phase = 0;
+        for (uint32_t i = 0; i < n; i++) {
+          phase += TWO_PI_F * (300.0f + 120.0f * sinf(TWO_PI_F * 3.0f * i / FX_RATE)) / FX_RATE;
+          if (phase > TWO_PI_F) phase -= TWO_PI_F;
+          fxOut[i] = (int16_t)constrain((int)(fxIn[i] * (0.35f + 0.9f * sinf(phase))), -32767, 32767);
+        } }
+      rate = FX_RATE * 115 / 100; break;
+    case 4: {                                                                      // echo
+      const uint32_t D = FX_RATE / 4;
+      n = min<uint32_t>(fxLen + FX_RATE * 3 / 2, FX_OUT);
+      for (uint32_t i = 0; i < n; i++) {
+        float y = (i < fxLen ? fxIn[i] : 0) + (i >= D ? 0.55f * fxOut[i - D] : 0);
+        fxOut[i] = (int16_t)constrain((int)y, -32767, 32767);
+      } break;
+    }
+    default: for (uint32_t i = 0; i < n; i++) fxOut[i] = fxIn[n - 1 - i];         // backwards
+  }
+  useSpeaker(); M5.Speaker.setVolume(volumeFor(5));
+  M5.Speaker.playRaw(fxOut, n, rate, false, 1, 0, true);
+}
+void stopFx() {
+  if (!fxRecording) return;
+  while (M5.Mic.isRecording()) delay(5);
+  fxRecording = false;
+  M5.Mic.end(); micActive = false;
+  fxLen = fxPos;
+  if (fxLen < FX_RATE / 4) { fxLen = 0; useSpeaker(); toast("Hold A while you talk"); return; }
+  // Make quiet recordings loud, and cut the click at the start
+  int peak = 1;
+  for (uint32_t i = 0; i < fxLen; i++) peak = max(peak, abs((int)fxIn[i]));
+  float g = min(8.0f, 29000.0f / peak);
+  for (uint32_t i = 0; i < fxLen; i++) fxIn[i] = (int16_t)(fxIn[i] * g * (i < 400 ? i / 400.0f : 1.0f));
+  playFx();
+}
+void checkFxFull() { if (fxRecording && fxPos + 800 > FX_MAX) stopFx(); }
+
 // ===========================================================================
 // Buttons
 // ===========================================================================
@@ -816,17 +1078,22 @@ void onButtonA_single() {
                      timerEndMs = (timerEndMs ? timerEndMs : millis()) + (uint32_t)extras.timerStep * 60000UL;
                      if (timerEndMs - millis() > 4UL * 3600000UL) timerEndMs = millis() + 4UL * 3600000UL; break;
     case SCR_NOTE:   playNote(); break;
+    case SCR_TV:     if (learnSlot >= 0) { endLearn(); notifyEvent(4); toast("Stopped"); } else tvPress(tvSel); break;
+    case SCR_VOICEFX: if (fxLen) { fxEffect = (fxEffect + 1) % FX_COUNT; playFx(); } else toast("Hold A and talk"); break;
     case SCR_CAMERA: cameraShutter(); break;
     case SCR_LIGHT:  flashlight = !flashlight; if (flashlight) M5.Display.setBrightness(255); else wake(); break;
     default: break;
   }
 }
 void onButtonA_double() {
+  if (screen == SCR_TV && tvMask) { nextTvButton(); return; }
   if (primaryUp) { notifyEvent(1); toast("Ringing your phone"); }
   else toast("Phone not connected");
 }
 void onButtonA_hold() {
   if (screen == SCR_NOTE) { startNote(); return; }
+  if (screen == SCR_VOICEFX) { startFx(); return; }
+  if (screen == SCR_TV && tvMask) { tvPress(tvSel); return; }   // keeps sending while held (see loop)
   if (screen == SCR_TIMER && timerEndMs) { timerEndMs = 0; timerDone = false; toast("Timer cleared"); return; }
   stopAlert();
   if (dndActive()) { dndUntilMs = 0; toast("Alerts on"); return; }
@@ -849,6 +1116,7 @@ void updateButtons() {
   }
   if (M5.BtnA.wasHold()) { swallowA = false; onButtonA_hold(); }   // holding is deliberate, so it works even from a dark screen
   if (M5.BtnA.wasReleased() && recordingNote) stopNote();
+  if (M5.BtnA.wasReleased() && fxRecording) stopFx();
   if (M5.BtnA.wasDecideClickCount()) {
     if (swallowA) swallowA = false;
     else if (M5.BtnA.getClickCount() == 1) onButtonA_single();
@@ -860,7 +1128,10 @@ void updateButtons() {
     flashlight = false;
     screen = (Screen)((screen + 1) % SCR_COUNT);
     if (screen == SCR_CHECK && !(extras.flags & X_CHECKLIST)) screen = SCR_TIMER;
+    if (screen == SCR_TV && !tvMask && learnSlot < 0) screen = SCR_CHECK;
+    if (screen == SCR_CHECK && !(extras.flags & X_CHECKLIST)) screen = SCR_TIMER;
     if (screen == SCR_CAMERA && !(extras.flags & X_CAMERA)) screen = SCR_LIGHT;
+    if (learnSlot >= 0 && screen != SCR_TV) { endLearn(); notifyEvent(4); }
     wake();
   }
   if (M5.BtnB.wasHold()) { screen = SCR_HOME; sleepScreen(); }
@@ -895,6 +1166,8 @@ class SettingsCB : public NimBLECharacteristicCallbacks {
       saveTextPending = true;
     } else if (c == commandChr && v.size() && v.size() <= sizeof(pendingCmd) && !pendingCmdLen) {
       memcpy(pendingCmd, v.data(), v.size()); pendingCmdLen = v.size();
+    } else if (c == irChr && v.size() && v.size() <= sizeof(irPend) && !irPendLen) {
+      memcpy(irPend, v.data(), v.size()); irPendLen = v.size();
     } else if (c == audioChr && v.size()) {
       const uint8_t* d = v.data();
       if (d[0] == 1 && v.size() >= 5) { clipExpected = min<uint32_t>(d[1] | (d[2] << 8), CLIP_MAX); clipRate = d[3] | (d[4] << 8); clipRecv = 0; }
@@ -1139,8 +1412,10 @@ void setupBle() {
   extrasChr   = svc->createCharacteristic(UUID_EXTRAS,   NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
   textChr     = svc->createCharacteristic(UUID_TEXT,     NIMBLE_PROPERTY::WRITE);
   statsChr    = svc->createCharacteristic(UUID_STATS,    NIMBLE_PROPERTY::READ);
-  for (auto* c : { settingsChr, quietChr, commandChr, audioChr, extrasChr, textChr }) c->setCallbacks(&settingsCB);
-  uint8_t info[4] = { MODEL_STICKS3, FW_VERSION, 0x3F /* screen, speaker, mic, camera, caller ID, stats */, 0 };
+  irChr       = svc->createCharacteristic(UUID_IR,       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE, 520);
+  for (auto* c : { settingsChr, quietChr, commandChr, audioChr, extrasChr, textChr, irChr }) c->setCallbacks(&settingsCB);
+  { uint8_t m = tvMask; irChr->setValue(&m, 1); }
+  uint8_t info[4] = { MODEL_STICKS3, FW_VERSION, 0xFF /* screen, speaker, mic, camera, caller ID, stats, TV remote, voice changer */, 0 };
   infoChr->setValue(info, sizeof(info));
   publishSettings();
   publishStats();
@@ -1179,6 +1454,10 @@ void setup() {
   LittleFS.begin(true);
   clipBuf = (uint8_t*)ps_malloc(CLIP_MAX);
   noteBuf = (uint8_t*)ps_malloc(VOICE_MAX);
+  tvCodes = (TvCode*)ps_calloc(TV_SLOTS, sizeof(TvCode));
+  fxIn  = (int16_t*)ps_malloc(FX_MAX * 2);
+  fxOut = (int16_t*)ps_malloc(FX_OUT * 2);
+  loadTv();
   if (File f = LittleFS.open("/clip.raw", "r")) { clipRate = f.read() | (f.read() << 8); clipLen = f.read(clipBuf, CLIP_MAX); f.close(); }
   if (File f = LittleFS.open("/note.raw", "r")) { noteLen = f.read(noteBuf, VOICE_MAX); f.close(); }
   ancsQueue = xQueueCreate(8, sizeof(AncsMsg));
@@ -1220,6 +1499,14 @@ void loop() {
   serviceAlert();
   serviceSound();
   serviceVibe();
+  serviceFx(); checkFxFull();
+  serviceLearn();
+  if (irPendLen) { static uint8_t d[520]; uint16_t n = irPendLen; memcpy(d, irPend, n); irPendLen = 0; handleIr(d, n); }
+  // holding A on the TV screen keeps sending (good for volume)
+  static uint32_t tvRepeat = 0;
+  if (screen == SCR_TV && tvMask && M5.BtnA.isHolding() && millis() - tvRepeat > 220) { tvRepeat = millis(); if (tvSel == 1 || tvSel == 2 || tvSel == 4 || tvSel == 5) tvPress(tvSel); }   // volume and channel only
+  // turn the 5V port off again when nothing needs it (saves battery)
+  if (irLastUse && millis() - irLastUse > 20000 && learnSlot < 0 && !vibeOn()) { irLastUse = 0; M5.Power.setExtOutput(false); }
   serviceAncs();
   // Every so often, pull a funny face on the home screen
   if (screenOn && screen == SCR_HOME && sillyOn() && primaryUp && !alerting && !dndActive() && (int32_t)(millis() - nextSilly) > 0) {
@@ -1232,7 +1519,7 @@ void loop() {
   if (millis() - lastBatt > 30000) { lastBatt = millis(); battery = M5.Power.getBatteryLevel(); charging = M5.Power.isCharging() == m5::Power_Class::is_charging; if (battery >= 0) hid->setBatteryLevel(battery, true); }
 
   // Screen: keep it on while something needs it, otherwise turn it off after a while
-  bool busy = alerting || calibrating || recordingNote || (flashlight && screen == SCR_LIGHT) || (int32_t)(flashUntil - millis()) > 0 ||
+  bool busy = alerting || calibrating || recordingNote || fxRecording || learnSlot >= 0 || (flashlight && screen == SCR_LIGHT) || (int32_t)(flashUntil - millis()) > 0 ||
               (notifyUntil && (int32_t)(notifyUntil - millis()) > 0) || (screen == SCR_FIND && millis() - lastActivity < 120000);
   if (busy) lastActivity = max(lastActivity, millis());
   if (screenOn && !busy && (int32_t)(millis() - lastActivity) > (int32_t)extras.screenSecs * 1000) { screen = SCR_HOME; sleepScreen(); }

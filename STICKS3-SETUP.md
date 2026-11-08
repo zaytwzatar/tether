@@ -73,9 +73,11 @@ When the screen is dark, the first press just wakes it (and stops an alert).
 |---|---|
 | **Home**: face, phone status, battery, clock, streak | make a funny face |
 | **Find my phone**: Cold → Warm → Hot! as you get closer | ring your phone |
+| **TV remote** (once set up) | send the button shown · twice: next button · hold: keep changing volume |
 | **Before you go**: your checklist ("Phone" ticks itself) | tick next item |
 | **Parking timer** | add time (hold to clear) |
 | **Voice note** | hold to record (up to 10 s), press to play |
+| **Voice changer** | hold and talk, let go to hear it back · press: next voice |
 | **Camera remote** | take a photo (open your camera app first) |
 | **Flashlight** | on / off |
 | **If found**: your message | — |
@@ -85,7 +87,27 @@ Change colors, brightness, how long the screen stays on, the checklist, the
 "if found" message, caller ID and the camera remote in the app:
 **My Tags › your tag › Screen & extras**.
 
-## 5. Funny faces, talking alerts and vibration
+## 5. TV remote
+
+In the app: **My Tags › your tag › TV remote**.
+
+1. Pick your TV brand.
+2. Point the tag at the TV, tap **Try Power**. If the TV reacts, tap **Yes, use this one**.
+   If not, tap **No, try the next** (most brands have 2 to 8 code sets).
+3. Brand not listed, or one button doesn't work? Tap **Teach** next to it, hold your old
+   TV remote close to the tag, and press that button. The tag learns it.
+
+Buttons: Power, Volume +/−, Mute, Channel +/−, Input, Home. Works within a few
+steps of the TV, like a normal remote. The TV codes come from the free
+Flipper-IRDB collection.
+
+## 6. Voice changer
+
+Press the side button until **Voice changer**. Hold the front button and talk
+(up to 6 seconds), let go and it plays back as a **Chipmunk**. Press the front
+button for the next voice: Monster, Robot, Alien, Echo, Backwards.
+
+## 7. Funny faces, talking alerts and vibration
 
 - **Funny faces:** the face winks, sticks out its tongue, wears sunglasses, gets
   heart eyes when your phone comes back, and cries during an alert. Turn this

@@ -455,3 +455,16 @@ textarea {
 /* Messages appear at the top so they never cover Save or other buttons */
 #toast { top: calc(.8rem + env(safe-area-inset-top)); bottom: auto !important; animation: drop .25s ease-out; }
 @keyframes drop { from { transform: translate(-50%, -1rem); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+
+/* TV remote page */
+.row2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: .6rem; }
+.tv-list { display: flex; flex-direction: column; }
+.tv-row { display: flex; align-items: center; gap: .5rem; padding: .7rem 0; border-top: 1px solid var(--field); flex-wrap: wrap; }
+.tv-row:first-child { border-top: 0; }
+.tv-row .grow { flex: 1; min-width: 7rem; }
+.tv-btns { display: flex; gap: .5rem; margin-left: auto; }
+.tv-row small { display: block; color: var(--muted); font-weight: 600; }
+.tv-row.learning { background: var(--sky-soft); border-radius: 14px; padding: .7rem .8rem; border-top-color: transparent; }
+.ok-text { color: var(--good) !important; font-weight: 800 !important; }
+.btn.small { min-height: 2.75rem; padding: 0 1rem; font-size: .95rem; }
+.plain-list { margin: 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .35rem; }
